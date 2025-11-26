@@ -7,8 +7,6 @@
 
 #include <cuda_runtime_api.h>
 
-#include <cuda/memory_resource>
-
 #include <rmm/resource_ref.hpp>
 
 #include <rapidsmpf/error.hpp>
@@ -16,17 +14,27 @@
 #include <rapidsmpf/utils.hpp>
 
 #if RAPIDSMPF_CUDA_VERSION_AT_LEAST(RAPIDSMPF_PINNED_MEM_RES_MIN_CUDA_VERSION)
+#if CCCL_MAJOR_VERSION > 3 || (CCCL_MAJOR_VERSION == 3 && CCCL_MINOR_VERSION >= 2)
+#include <cuda/memory_resource>
+#else
 #include <cuda/experimental/memory_resource.cuh>
+#endif
 #endif
 
 namespace rapidsmpf {
 #if RAPIDSMPF_CUDA_VERSION_AT_LEAST(RAPIDSMPF_PINNED_MEM_RES_MIN_CUDA_VERSION)
 namespace {
+#if CCCL_MAJOR_VERSION > 3 || (CCCL_MAJOR_VERSION == 3 && CCCL_MINOR_VERSION >= 2)
+cuda::memory_pool_properties get_memory_pool_properties(PinnedPoolProperties const&) {
+    return cuda::memory_pool_properties{};
+}
+#else
 cuda::experimental::memory_pool_properties get_memory_pool_properties(
     PinnedPoolProperties const&
 ) {
     return cuda::experimental::memory_pool_properties{};
 }
+#endif
 }  // namespace
 
 // PinnedMemoryPool implementation
@@ -38,7 +46,11 @@ struct PinnedMemoryPool::PinnedMemoryPoolImpl {
     // numa_id, that uses CU_MEM_LOCATION_TYPE_HOST instead of
     // CU_MEM_LOCATION_TYPE_HOST_NUMA
 
+#if CCCL_MAJOR_VERSION > 3 || (CCCL_MAJOR_VERSION == 3 && CCCL_MINOR_VERSION >= 2)
+    cuda::pinned_memory_pool p_pool;
+#else
     cuda::experimental::pinned_memory_pool p_pool;
+#endif
 };
 
 // PinnedMemoryResource implementation
@@ -71,7 +83,11 @@ struct PinnedMemoryResource::PinnedMemoryResourceImpl {
         p_resource.deallocate_sync(ptr, bytes, alignment);
     }
 
+#if CCCL_MAJOR_VERSION > 3 || (CCCL_MAJOR_VERSION == 3 && CCCL_MINOR_VERSION >= 2)
+    cuda::pinned_memory_pool p_resource;
+#else
     cuda::experimental::pinned_memory_resource p_resource;
+#endif
 };
 #else  // CUDA_VERSION < RAPIDSMPF_PINNED_MEM_RES_MIN_CUDA_VERSION
 struct PinnedMemoryPool::PinnedMemoryPoolImpl {
