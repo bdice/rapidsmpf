@@ -126,8 +126,19 @@ bool RmmResourceAdaptor::do_is_equal(
     if (cast == nullptr) {
         return false;
     }
-    return get_upstream_resource() == cast->get_upstream_resource()
-           && get_fallback_resource() == cast->get_fallback_resource();
+    // Manual comparison of optionals to avoid recursive constraint satisfaction in
+    // CCCL 3.2. std::optional::operator== triggers infinite concept checking when the
+    // wrapped type (rmm::device_async_resource_ref) inherits from CCCL's concept-based
+    // resource_ref. Even adding explicit member operator== doesn't help - std::optional's
+    // concept checking still sees the base class concept-based operator== during overload
+    // resolution. See optional_concept_bug.cpp and optional_concept_fixed.cpp for minimal
+    // reproductions.
+    auto this_fallback = get_fallback_resource();
+    auto other_fallback = cast->get_fallback_resource();
+    bool fallbacks_equal =
+        (this_fallback.has_value() == other_fallback.has_value())
+        && (!this_fallback.has_value() || (*this_fallback == *other_fallback));
+    return get_upstream_resource() == cast->get_upstream_resource() && fallbacks_equal;
 }
 
 }  // namespace rapidsmpf

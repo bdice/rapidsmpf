@@ -55,7 +55,13 @@ struct PinnedMemoryPool::PinnedMemoryPoolImpl {
 
 // PinnedMemoryResource implementation
 struct PinnedMemoryResource::PinnedMemoryResourceImpl {
+#if CCCL_MAJOR_VERSION > 3 || (CCCL_MAJOR_VERSION == 3 && CCCL_MINOR_VERSION >= 2)
+    // CCCL 3.2+: pinned_memory_pool has deleted copy constructor, but can convert to ref
+    PinnedMemoryResourceImpl(PinnedMemoryPool& pool)
+        : p_resource{static_cast<cuda::pinned_memory_pool_ref&>(pool.impl_->p_pool)} {}
+#else
     PinnedMemoryResourceImpl(PinnedMemoryPool& pool) : p_resource{pool.impl_->p_pool} {}
+#endif
 
     void* allocate(rmm::cuda_stream_view stream, size_t bytes) {
         return p_resource.allocate(stream, bytes);
@@ -84,8 +90,10 @@ struct PinnedMemoryResource::PinnedMemoryResourceImpl {
     }
 
 #if CCCL_MAJOR_VERSION > 3 || (CCCL_MAJOR_VERSION == 3 && CCCL_MINOR_VERSION >= 2)
-    cuda::pinned_memory_pool p_resource;
+    // CCCL 3.2+: pinned_memory_pool_ref is the resource (non-owning reference)
+    cuda::pinned_memory_pool_ref p_resource;
 #else
+    // Pre-CCCL 3.2: experimental::pinned_memory_resource
     cuda::experimental::pinned_memory_resource p_resource;
 #endif
 };
