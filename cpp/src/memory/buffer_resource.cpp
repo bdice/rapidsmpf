@@ -65,7 +65,7 @@ std::shared_ptr<BufferResource> BufferResource::from_options(
 
     auto statistics = Statistics::from_options(mr, options, pinned_mr);
     return std::make_shared<BufferResource>(
-        mr,
+        *mr,
         std::move(pinned_mr),
         std::move(mem_available),
         periodic_spill_check_from_options(options),

@@ -76,7 +76,7 @@ static void BM_Pack_device(benchmark::State& state) {
 
     // Create memory resources
     rmm::mr::cuda_async_memory_resource cuda_mr;
-    rmm::mr::pool_memory_resource<rmm::mr::cuda_async_memory_resource> pool_mr{
+    rmm::mr::pool_memory_resource pool_mr{
         cuda_mr, rmm::percent_of_free_device_memory(40)
     };
     run_pack(state, table_size_mb, pool_mr, pool_mr, stream);
@@ -98,7 +98,7 @@ static void BM_Pack_pinned(benchmark::State& state) {
 
     // Create memory resources
     rmm::mr::cuda_async_memory_resource cuda_mr;
-    rmm::mr::pool_memory_resource<rmm::mr::cuda_async_memory_resource> pool_mr{
+    rmm::mr::pool_memory_resource pool_mr{
         cuda_mr, rmm::percent_of_free_device_memory(40)
     };
     rapidsmpf::PinnedMemoryResource pinned_mr;
@@ -195,7 +195,7 @@ static void BM_ChunkedPack_device(benchmark::State& state) {
     rmm::cuda_stream_view stream = rmm::cuda_stream_default;
 
     rmm::mr::cuda_async_memory_resource cuda_mr;
-    rmm::mr::pool_memory_resource<rmm::mr::cuda_async_memory_resource> pool_mr{
+    rmm::mr::pool_memory_resource pool_mr{
         cuda_mr, rmm::percent_of_free_device_memory(40)
     };
 
@@ -223,7 +223,7 @@ static void BM_ChunkedPack_pinned(benchmark::State& state) {
     rmm::cuda_stream_view stream = rmm::cuda_stream_default;
 
     rmm::mr::cuda_async_memory_resource cuda_mr;
-    rmm::mr::pool_memory_resource<rmm::mr::cuda_async_memory_resource> pool_mr{
+    rmm::mr::pool_memory_resource pool_mr{
         cuda_mr, rmm::percent_of_free_device_memory(40)
     };
     rapidsmpf::PinnedMemoryResource pinned_mr;
@@ -274,7 +274,7 @@ static void BM_ChunkedPack_fixed_table_device(benchmark::State& state) {
     // Create memory resources
     rmm::mr::cuda_async_memory_resource cuda_mr;
 
-    rmm::mr::pool_memory_resource<rmm::mr::cuda_async_memory_resource> pool_mr{
+    rmm::mr::pool_memory_resource pool_mr{
         cuda_mr, rmm::percent_of_free_device_memory(40)
     };
 
@@ -300,7 +300,7 @@ static void BM_ChunkedPack_fixed_table_pinned(benchmark::State& state) {
     rmm::cuda_stream_view stream = rmm::cuda_stream_default;
 
     rmm::mr::cuda_async_memory_resource cuda_mr;
-    rmm::mr::pool_memory_resource<rmm::mr::cuda_async_memory_resource> pool_mr{
+    rmm::mr::pool_memory_resource pool_mr{
         cuda_mr, rmm::percent_of_free_device_memory(40)
     };
     rapidsmpf::PinnedMemoryResource pinned_mr;
