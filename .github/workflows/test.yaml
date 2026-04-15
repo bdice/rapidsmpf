@@ -25,7 +25,7 @@ on:
 jobs:
   conda-cpp-tests:
     secrets: inherit
-    uses: rapidsai/shared-workflows/.github/workflows/conda-cpp-tests.yaml@cuda-13.1.0
+    uses: rapidsai/shared-workflows/.github/workflows/conda-cpp-tests.yaml@main
     with:
       build_type: ${{ inputs.build_type }}
       branch: ${{ inputs.branch }}
@@ -33,10 +33,9 @@ jobs:
       date: ${{ inputs.date }}
       script: ci/test_cpp.sh
       sha: ${{ inputs.sha }}
-      sccache-dist-token-secret-name: GIST_REPO_READ_ORG_GITHUB_TOKEN
   conda-cpp-memcheck:
     secrets: inherit
-    uses: rapidsai/shared-workflows/.github/workflows/custom-job.yaml@cuda-13.1.0
+    uses: rapidsai/shared-workflows/.github/workflows/custom-job.yaml@main
     with:
       build_type: ${{ inputs.build_type }}
       branch: ${{ inputs.branch }}
@@ -47,7 +46,7 @@ jobs:
       sha: ${{ inputs.sha }}
   conda-python-tests:
     secrets: inherit
-    uses: rapidsai/shared-workflows/.github/workflows/conda-python-tests.yaml@cuda-13.1.0
+    uses: rapidsai/shared-workflows/.github/workflows/conda-python-tests.yaml@main
     with:
       build_type: ${{ inputs.build_type }}
       branch: ${{ inputs.branch }}
@@ -56,10 +55,9 @@ jobs:
       run_codecov: false
       script: ci/test_python.sh
       sha: ${{ inputs.sha }}
-      sccache-dist-token-secret-name: GIST_REPO_READ_ORG_GITHUB_TOKEN
   wheel-test:
     secrets: inherit
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-test.yaml@cuda-13.1.0
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-test.yaml@main
     with:
       build_type: ${{ inputs.build_type }}
       branch: ${{ inputs.branch }}
@@ -67,4 +65,3 @@ jobs:
       date: ${{ inputs.date }}
       sha: ${{ inputs.sha }}
       script: ci/test_wheel.sh
-      sccache-dist-token-secret-name: GIST_REPO_READ_ORG_GITHUB_TOKEN

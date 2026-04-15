@@ -1,14 +1,13 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <utility>
 
-#include <rapidsmpf/communicator/communicator.hpp>
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/progress_thread.hpp>
-#include <rapidsmpf/utils.hpp>
+#include <rapidsmpf/utils/misc.hpp>
 
 namespace rapidsmpf {
 
@@ -24,11 +23,8 @@ void ProgressThread::FunctionState::operator()() {
     }
 }
 
-ProgressThread::ProgressThread(
-    Communicator::Logger& logger, std::shared_ptr<Statistics> statistics, Duration sleep
-)
-    : logger_(logger),
-      statistics_(std::move(statistics)),
+ProgressThread::ProgressThread(std::shared_ptr<Statistics> statistics, Duration sleep)
+    : statistics_(std::move(statistics)),
       thread_(
           [this]() {
               if (!is_thread_initialized_) {
@@ -49,9 +45,7 @@ ProgressThread::~ProgressThread() {
 }
 
 void ProgressThread::stop() {
-    logger_.debug("ProgressThread.stop() - initiate");
     thread_.stop();
-    logger_.debug("ProgressThread.stop() - done");
 }
 
 ProgressThread::FunctionID ProgressThread::add_function(Function&& function) {
@@ -119,6 +113,10 @@ void ProgressThread::resume() {
 bool ProgressThread::is_running() const {
     std::lock_guard lock(mutex_);
     return active_;
+}
+
+std::shared_ptr<Statistics> ProgressThread::statistics() const noexcept {
+    return statistics_;
 }
 
 void ProgressThread::event_loop() {

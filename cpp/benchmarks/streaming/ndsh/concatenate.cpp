@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,12 +19,10 @@
 #include <rapidsmpf/streaming/core/message.hpp>
 #include <rapidsmpf/streaming/cudf/table_chunk.hpp>
 
-#include "utils.hpp"
-
 namespace rapidsmpf::ndsh {
 
 
-streaming::Node concatenate(
+streaming::Actor concatenate(
     std::shared_ptr<streaming::Context> ctx,
     std::shared_ptr<streaming::Channel> ch_in,
     std::shared_ptr<streaming::Channel> ch_out,
@@ -33,7 +31,7 @@ streaming::Node concatenate(
     streaming::ShutdownAtExit c{ch_in, ch_out};
     CudaEvent event;
     std::vector<streaming::Message> messages;
-    ctx->comm()->logger().print("Concatenate");
+    ctx->logger()->print("Concatenate");
     auto concat_stream = ctx->br()->stream_pool().get_stream();
     while (!ch_out->is_shutdown()) {
         co_await ctx->executor()->schedule();
@@ -65,8 +63,8 @@ streaming::Node concatenate(
         chunks.reserve(messages.size());
         views.reserve(messages.size());
         for (auto&& msg : messages) {
-            auto chunk = msg.release<streaming::TableChunk>();
-            chunk = to_device(ctx, std::move(chunk));
+            auto chunk =
+                co_await msg.release<streaming::TableChunk>().make_available(ctx);
             cuda_stream_join(concat_stream, chunk.stream(), &event);
             views.push_back(chunk.table_view());
             chunks.push_back(std::move(chunk));

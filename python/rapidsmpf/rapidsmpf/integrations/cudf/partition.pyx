@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 """Partitioning of cuDF tables."""
 
@@ -6,7 +6,7 @@ from cython.operator cimport dereference as deref
 from cython.operator cimport postincrement
 from libc.stdint cimport uint32_t
 from libcpp cimport bool as bool_t
-from libcpp.memory cimport make_unique, shared_ptr, unique_ptr
+from libcpp.memory cimport make_unique, unique_ptr
 from libcpp.unordered_map cimport unordered_map
 from libcpp.utility cimport move
 from libcpp.vector cimport vector
@@ -17,11 +17,12 @@ from pylibcudf.table cimport Table
 from rmm.librmm.cuda_stream_view cimport cuda_stream_view
 from rmm.pylibrmm.stream cimport Stream
 
-from rapidsmpf.memory.buffer_resource cimport (BufferResource,
+from rapidsmpf._detail.exception_handling cimport ex_handler
+from rapidsmpf.memory.buffer_resource cimport (AllowOverbooking,
+                                               BufferResource,
                                                cpp_BufferResource)
 from rapidsmpf.memory.packed_data cimport (PackedData, cpp_PackedData,
                                            packed_data_vector_to_list)
-from rapidsmpf.statistics cimport Statistics, cpp_Statistics
 
 
 cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
@@ -37,7 +38,7 @@ cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
             uint32_t seed,
             cuda_stream_view stream,
             cpp_BufferResource* br,
-        ) except +
+        ) except +ex_handler
 
     cdef unordered_map[uint32_t, cpp_PackedData] cpp_split_and_pack \
         "rapidsmpf::split_and_pack"(
@@ -45,7 +46,7 @@ cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
             const vector[size_type] &splits,
             cuda_stream_view stream,
             cpp_BufferResource* br,
-        ) except +
+        ) except +ex_handler
 
 
 def partition_and_pack(
@@ -106,7 +107,8 @@ def partition_and_pack(
     cdef unordered_map[uint32_t, cpp_PackedData].iterator it = _ret.begin()
     while(it != _ret.end()):
         ret[deref(it).first] = PackedData.from_librapidsmpf(
-            make_unique[cpp_PackedData](move(deref(it).second))
+            make_unique[cpp_PackedData](move(deref(it).second)),
+            br,
         )
         postincrement(it)
     return ret
@@ -127,8 +129,7 @@ def split_and_pack(
         The input table to split and pack. The table cannot be empty (the
         split points would not be valid).
     splits
-        The split points, equivalent to :func:`cudf::split`, i.e., one less than
-        the number of result partitions.
+        The split points, one less than the number of result partitions.
     stream
         The CUDA stream used for memory operations.
     br
@@ -165,7 +166,8 @@ def split_and_pack(
     cdef unordered_map[uint32_t, cpp_PackedData].iterator it = _ret.begin()
     while(it != _ret.end()):
         ret[deref(it).first] = PackedData.from_librapidsmpf(
-            make_unique[cpp_PackedData](move(deref(it).second))
+            make_unique[cpp_PackedData](move(deref(it).second)),
+            br,
         )
         postincrement(it)
     return ret
@@ -177,7 +179,7 @@ cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
             vector[cpp_PackedData] partition,
             cuda_stream_view stream,
             cpp_BufferResource* br,
-        ) except +
+        ) except +ex_handler
 
 
 # Help function to convert an iterable of `PackedData` to a vector of
@@ -225,7 +227,7 @@ def unpack_and_concat(
 
     Raises
     ------
-    OverflowError
+    ReservationError
         If the buffer resource cannot reserve enough memory to concatenate all
         partitions.
 
@@ -251,14 +253,12 @@ cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
         "rapidsmpf::spill_partitions"(
             vector[cpp_PackedData] partitions,
             cpp_BufferResource* br,
-            shared_ptr[cpp_Statistics] statistics,
-        ) except +
+        ) except +ex_handler
 
 
 def spill_partitions(
     partitions,
     BufferResource br not None,
-    Statistics statistics = None,
 ):
     """
     Spill partitions from device memory to host memory.
@@ -279,8 +279,6 @@ def spill_partitions(
         The partitions to spill.
     br
         Buffer resource used to reserve host memory and perform the move.
-    statistics
-        The statistics instance to use. If None, statistics is disabled.
 
     Returns
     -------
@@ -288,21 +286,18 @@ def spill_partitions(
 
     Raises
     ------
-    OverflowError
+    ReservationError
         If host memory reservation fails.
     """
     cdef cpp_BufferResource* _br = br.ptr()
     cdef vector[cpp_PackedData] _partitions = _partitions_py_to_cpp(partitions)
     cdef vector[cpp_PackedData] _ret
-    if statistics is None:
-        statistics = Statistics(enable=False)  # Disables statistics.
     with nogil:
         _ret = cpp_spill_partitions(
             move(_partitions),
             _br,
-            statistics._handle,
         )
-    return packed_data_vector_to_list(move(_ret))
+    return packed_data_vector_to_list(move(_ret), br)
 
 
 cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
@@ -310,16 +305,14 @@ cdef extern from "<rapidsmpf/integrations/cudf/partition.hpp>" nogil:
         "rapidsmpf::unspill_partitions"(
             vector[cpp_PackedData] partitions,
             cpp_BufferResource* br,
-            bool_t allow_overbooking,
-            shared_ptr[cpp_Statistics] statistics,
-        ) except +
+            AllowOverbooking allow_overbooking,
+        ) except +ex_handler
 
 
 def unspill_partitions(
     partitions,
     BufferResource br not None,
     bool_t allow_overbooking,
-    Statistics statistics = None,
 ):
     """
     Move spilled partitions (i.e., packed tables in host memory) back to device memory.
@@ -344,8 +337,6 @@ def unspill_partitions(
     allow_overbooking
         If False, ensures enough memory is freed to satisfy the reservation;
         otherwise, allows overbooking even if spilling was insufficient.
-    statistics
-        The statistics instance to use. If None, statistics is disabled.
 
     Returns
     -------
@@ -353,19 +344,19 @@ def unspill_partitions(
 
     Raises
     ------
-    OverflowError
+    ReservationError
         If overbooking exceeds the amount spilled and ``allow_overbooking is False``.
     """
     cdef cpp_BufferResource* _br = br.ptr()
     cdef vector[cpp_PackedData] _partitions = _partitions_py_to_cpp(partitions)
     cdef vector[cpp_PackedData] _ret
-    if statistics is None:
-        statistics = Statistics(enable=False)  # Disables statistics.
+    cdef AllowOverbooking ab = (
+        AllowOverbooking.YES if allow_overbooking else AllowOverbooking.NO
+    )
     with nogil:
         _ret = cpp_unspill_partitions(
             move(_partitions),
             _br,
-            allow_overbooking,
-            statistics._handle,
+            ab,
         )
-    return packed_data_vector_to_list(move(_ret))
+    return packed_data_vector_to_list(move(_ret), br)

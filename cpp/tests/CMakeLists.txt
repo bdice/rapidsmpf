@@ -1,6 +1,6 @@
 # =================================================================================
 # cmake-format: off
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # cmake-format: on
 # =================================================================================
@@ -31,8 +31,8 @@ function(rapidsmpf_mpirun_test_add)
   foreach(np IN ITEMS ${nranks_to_run})
     # add the test using the relative path of the target
     add_test(
-      NAME "${_MPIRUN_TEST_TEST_TARGET}_${np}"
-      COMMAND mpirun --map-by=node --bind-to=none -np=${np} "gtests/${_MPIRUN_TEST_TEST_TARGET}"
+      NAME "${_MPIRUN_TEST_TEST_TARGET}_${np}" COMMAND mpirun --map-by node --bind-to none -np
+                                                       ${np} "gtests/${_MPIRUN_TEST_TEST_TARGET}"
     )
   endforeach(np)
 endfunction(rapidsmpf_mpirun_test_add)
@@ -71,6 +71,8 @@ disable_sign_conversion_warning(test_sources)
 target_sources(
   test_sources
   PRIVATE test_allgather.cpp
+          test_allreduce.cu
+          test_buffer.cpp
           test_buffer_resource.cpp
           test_chunk.cpp
           test_communicator.cpp
@@ -79,8 +81,10 @@ target_sources(
           test_cudf_utils.cpp
           test_cupti_monitor.cpp
           test_error_macros.cpp
+          test_gather_statistics.cpp
           test_host_buffer.cpp
           test_metadata_payload_exchange.cpp
+          test_misc.cpp
           test_partition.cpp
           test_pausable_thread_loop.cpp
           test_progress_thread.cpp
@@ -89,7 +93,9 @@ target_sources(
           test_shuffler.cpp
           test_spill_manager.cpp
           test_statistics.cpp
-          test_utils.cpp
+          test_stream_ordered_timing.cpp
+          test_system_info.cpp
+          test_utils_string.cpp
 )
 
 # if streaming is enabled, add the streaming test sources
@@ -97,13 +103,16 @@ if(RAPIDSMPF_HAVE_STREAMING)
   target_sources(
     test_sources
     PRIVATE streaming/test_allgather.cpp
+            streaming/test_allreduce.cpp
+            streaming/test_channel.cpp
             streaming/test_error_handling.cpp
             streaming/test_fanout.cpp
-            streaming/test_leaf_node.cpp
+            streaming/test_leaf_actor.cpp
             streaming/test_lineariser.cpp
             streaming/test_memory_reserve_or_wait.cpp
             streaming/test_message.cpp
             streaming/test_partition.cpp
+            streaming/test_channel_metadata.cpp
             streaming/test_read_parquet.cpp
             streaming/test_shuffler.cpp
             streaming/test_spillable_messages.cpp
@@ -180,7 +189,7 @@ endif()
 
 # rrun_tests - Tests for rrun launcher, topology discovery and resource binding functionality. These
 # tests must be run with rrun, not via ctest/mpirun. Example: `rrun -n 1 gtests/rrun_tests`
-add_executable(rrun_tests main/rrun.cpp test_rrun.cpp)
+add_executable(rrun_tests main/rrun.cpp test_rrun.cpp test_rrun_bind.cpp)
 set_target_properties(
   rrun_tests
   PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<BUILD_INTERFACE:${RAPIDSMPF_BINARY_DIR}/gtests>"
@@ -198,8 +207,8 @@ target_compile_options(
 )
 target_link_libraries(
   rrun_tests
-  PRIVATE rapidsmpf::rapidsmpf GTest::gmock GTest::gtest $<TARGET_NAME_IF_EXISTS:conda_env>
-          maybe_asan $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
+  PRIVATE rapidsmpf::rapidsmpf cuCascade::cucascade GTest::gmock GTest::gtest
+          $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
 )
 disable_sign_conversion_warning(rrun_tests)
 
@@ -225,6 +234,7 @@ target_link_libraries(
   PRIVATE rapidsmpf::rapidsmpf GTest::gmock GTest::gtest $<TARGET_NAME_IF_EXISTS:conda_env>
           $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa> maybe_asan test_sources
 )
+target_sources(single_tests PRIVATE test_nvtx.cpp)
 disable_sign_conversion_warning(single_tests)
 add_test(NAME single_tests COMMAND "gtests/single_tests")
 

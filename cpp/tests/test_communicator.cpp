@@ -1,7 +1,9 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+
+#include <stdexcept>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -13,6 +15,7 @@
 #include <rapidsmpf/communicator/communicator.hpp>
 #include <rapidsmpf/memory/buffer.hpp>
 #include <rapidsmpf/memory/buffer_resource.hpp>
+#include <rapidsmpf/memory/cuda_memcpy_async.hpp>
 
 #include "environment.hpp"
 #include "utils.hpp"
@@ -26,14 +29,9 @@ class BaseCommunicatorTest : public ::testing::Test {
         );
         br = std::make_unique<rapidsmpf::BufferResource>(mr.get());
         stream = rmm::cuda_stream_default;
-        GlobalEnvironment->barrier();
     }
 
-    void TearDown() override {
-        GlobalEnvironment->barrier();
-    }
-
-    virtual rapidsmpf::MemoryType memory_type() = 0;
+    void TearDown() override {}
 
     rapidsmpf::Communicator* comm;
     std::unique_ptr<rmm::mr::device_memory_resource> mr;
@@ -41,11 +39,27 @@ class BaseCommunicatorTest : public ::testing::Test {
     std::unique_ptr<rapidsmpf::BufferResource> br;
 };
 
+TEST_F(BaseCommunicatorTest, TagConstruction) {
+    EXPECT_THROW(
+        rapidsmpf::Tag(0, 1 << rapidsmpf::Tag::stage_id_bits), std::overflow_error
+    );
+    EXPECT_THROW(rapidsmpf::Tag(1 << rapidsmpf::Tag::op_id_bits, 0), std::overflow_error);
+    EXPECT_NO_THROW(rapidsmpf::Tag(0, (1 << rapidsmpf::Tag::stage_id_bits) - 1));
+    EXPECT_NO_THROW(
+        rapidsmpf::Tag(
+            (1 << rapidsmpf::Tag::op_id_bits) - 1,
+            (1 << rapidsmpf::Tag::stage_id_bits) - 1
+        )
+    );
+    EXPECT_THROW(rapidsmpf::Tag(0, -1), std::overflow_error);
+    EXPECT_THROW(rapidsmpf::Tag(-1, 0), std::overflow_error);
+}
+
 class BasicCommunicatorTest
     : public BaseCommunicatorTest,
       public ::testing::WithParamInterface<rapidsmpf::MemoryType> {
   protected:
-    rapidsmpf::MemoryType memory_type() override {
+    rapidsmpf::MemoryType memory_type() {
         return GetParam();
     }
 };
@@ -70,9 +84,11 @@ TEST_P(BasicCommunicatorTest, SendToSelf) {
     auto send_data_h = iota_vector<std::uint8_t>(nelems);
     auto send_buf = br->allocate(stream, br->reserve_or_fail(nelems, memory_type()));
     send_buf->write_access([&](std::byte* send_buf_data, rmm::cuda_stream_view stream) {
-        RAPIDSMPF_CUDA_TRY(cudaMemcpyAsync(
-            send_buf_data, send_data_h.data(), nelems, cudaMemcpyDefault, stream
-        ));
+        RAPIDSMPF_CUDA_TRY(
+            rapidsmpf::cuda_memcpy_async(
+                send_buf_data, send_data_h.data(), nelems, stream
+            )
+        );
     });
     send_buf->stream().synchronize();
     rapidsmpf::Tag tag{0, 0};
@@ -83,8 +99,9 @@ TEST_P(BasicCommunicatorTest, SendToSelf) {
     auto recv_fut = comm->recv(comm->rank(), tag, std::move(recv_buf));
     std::ignore = comm->wait(std::move(send_fut));
     recv_buf = comm->wait(std::move(recv_fut));
-    auto [host_reservation, host_ob] =
-        br->reserve(rapidsmpf::MemoryType::HOST, nelems, true);
+    auto [host_reservation, host_ob] = br->reserve(
+        rapidsmpf::MemoryType::HOST, nelems, rapidsmpf::AllowOverbooking::YES
+    );
     auto recv_data_h = br->move_to_host_buffer(std::move(recv_buf), host_reservation);
     stream.synchronize();
     EXPECT_EQ(send_data_h, recv_data_h->copy_to_uint8_vector());

@@ -1,8 +1,7 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-
 
 #include <atomic>
 #include <thread>
@@ -11,7 +10,8 @@
 
 #include <rapidsmpf/streaming/core/context.hpp>
 #include <rapidsmpf/streaming/core/memory_reserve_or_wait.hpp>
-#include <rapidsmpf/utils.hpp>
+#include <rapidsmpf/utils/misc.hpp>
+#include <rapidsmpf/utils/string.hpp>
 
 #include "base_streaming_fixture.hpp"
 
@@ -62,25 +62,46 @@ INSTANTIATE_TEST_SUITE_P(
     }
 );
 
+TEST_P(StreamingMemoryReserveOrWait, AccessorsReturnExpectedValues) {
+    config::Options options{
+        {{"memory_reserve_timeout", config::OptionValue("12345 ms")}}
+    };
+
+    MemoryReserveOrWait mrow{options, MemoryType::DEVICE, ctx->executor(), ctx->br()};
+
+    // Executor and buffer resource should match the context.
+    EXPECT_EQ(mrow.executor(), ctx->executor());
+    EXPECT_EQ(mrow.br(), ctx->br());
+
+    // Timeout should match the configured value.
+    EXPECT_EQ(mrow.timeout(), parse_duration("12345 ms"));
+}
+
 TEST_P(StreamingMemoryReserveOrWait, ShutdownEarly) {
     if (is_running_under_valgrind()) {
         GTEST_SKIP() << "Test runs very slow in valgrind";
-    }
-    MemoryReserveOrWait mrow{MemoryType::DEVICE, ctx, std::chrono::seconds{100}};
+    };
+    MemoryReserveOrWait mrow{
+        // Use a very high timeout to effectively disable timeout in this test.
+        config::Options({{"memory_reserve_timeout", config::OptionValue("1 min")}}),
+        MemoryType::DEVICE,
+        ctx->executor(),
+        ctx->br()
+    };
 
     // Create a reserve request while no memory is available.
     set_mem_avail(0);
-    std::vector<Node> nodes;
-    nodes.push_back([](MemoryReserveOrWait& mrow) -> Node {
+    std::vector<Actor> actors;
+    actors.push_back([](MemoryReserveOrWait& mrow) -> Actor {
         EXPECT_THROW(
-            std::ignore = co_await mrow.reserve_or_wait(10, 1), std::runtime_error
+            std::ignore = co_await mrow.reserve_or_wait(10, 0), std::runtime_error
         );
     }(mrow));
 
     // Run the pipeline on a dedicated thread.
-    std::thread thd(run_streaming_pipeline, std::move(nodes));
+    std::thread thd(run_actor_network, std::move(actors));
 
-    // Wait until the node has submitted its request (`mrow.size() == 1`).
+    // Wait until the actor has submitted its request (`mrow.size() == 1`).
     while (mrow.size() < 1) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -91,13 +112,18 @@ TEST_P(StreamingMemoryReserveOrWait, ShutdownEarly) {
 }
 
 struct ReserveLog {
-    void add(uint64_t uid, MemoryReservation&& res) {
+    void add(std::uint64_t uid, MemoryReservation&& res) {
         std::lock_guard<std::mutex> lock(mutex);
         log.emplace_back(uid, std::move(res));
     }
 
+    std::size_t size() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return log.size();
+    }
+
     std::mutex mutex;
-    std::vector<std::pair<uint64_t, MemoryReservation>> log;
+    std::vector<std::pair<std::uint64_t, MemoryReservation>> log;
 };
 
 TEST_P(StreamingMemoryReserveOrWait, CheckPriority) {
@@ -105,26 +131,32 @@ TEST_P(StreamingMemoryReserveOrWait, CheckPriority) {
         GTEST_SKIP() << "Test runs very slow in valgrind";
     }
     ReserveLog log;
-    MemoryReserveOrWait mrow{MemoryType::DEVICE, ctx, std::chrono::seconds{100}};
+    MemoryReserveOrWait mrow{
+        // Use a very high timeout to effectively disable timeout in this test.
+        config::Options({{"memory_reserve_timeout", config::OptionValue("1 min")}}),
+        MemoryType::DEVICE,
+        ctx->executor(),
+        ctx->br()
+    };
 
-    // Create two reserve request while no memory is available.
+    // Create two reserve requests while no memory is available.
     set_mem_avail(0);
-    std::vector<Node> nodes;
-    // One request with `future_release_potential = 1`.
-    nodes.push_back([](ReserveLog& log, MemoryReserveOrWait& mrow) -> Node {
+    std::vector<Actor> actors;
+    // One request with `net_memory_delta = 1`.
+    actors.push_back([](ReserveLog& log, MemoryReserveOrWait& mrow) -> Actor {
         auto res = co_await mrow.reserve_or_wait(10, 1);
         EXPECT_EQ(res.size(), 10);
         log.add(1, std::move(res));
     }(log, mrow));
-    // And one request with `future_release_potential = 2`.
-    nodes.push_back([](ReserveLog& log, MemoryReserveOrWait& mrow) -> Node {
+    // And one request with `net_memory_delta = 2`.
+    actors.push_back([](ReserveLog& log, MemoryReserveOrWait& mrow) -> Actor {
         auto res = co_await mrow.reserve_or_wait(10, 2);
         EXPECT_EQ(res.size(), 10);
         log.add(2, std::move(res));
     }(log, mrow));
 
     // Run the pipeline on a dedicated thread.
-    std::thread thd(run_streaming_pipeline, std::move(nodes));
+    std::thread thd(run_actor_network, std::move(actors));
 
     // Ensure both requests are submitted and periodic_memory_check has run at least once.
     while (mrow.size() < 2) {
@@ -138,18 +170,25 @@ TEST_P(StreamingMemoryReserveOrWait, CheckPriority) {
     // Only enough memory for ONE request, so completion order reflects selection order.
     set_mem_avail(10);
 
-    // Wait until exactly one reservation completes.
-    while (log.log.size() < 1)
-    {  // make sure log.log.size() is thread-safe, see note below
+    // Wait until at least one reservation completes.
+    while (log.size() < 1) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_EQ(log.log.at(0).first, 2);
+
+    {
+        std::lock_guard lk{log.mutex};
+        // Smaller `net_memory_delta` has higher priority, so request 1 should complete
+        // first.
+        EXPECT_EQ(log.log.at(0).first, 1);
+    }
 
     // Now allow the second request to complete.
     set_mem_avail(20);
     thd.join();
-    EXPECT_EQ(log.log.at(0).first, 2);
-    EXPECT_EQ(log.log.at(1).first, 1);
+    {
+        std::lock_guard lk{log.mutex};
+        EXPECT_EQ(log.log.at(1).first, 2);
+    }
 }
 
 TEST_P(StreamingMemoryReserveOrWait, RestartPeriodicTask) {
@@ -157,17 +196,23 @@ TEST_P(StreamingMemoryReserveOrWait, RestartPeriodicTask) {
         GTEST_SKIP() << "Test runs very slow in valgrind";
     }
 
-    MemoryReserveOrWait mrow{MemoryType::DEVICE, ctx, std::chrono::seconds{100}};
+    MemoryReserveOrWait mrow{
+        // Use a very high timeout to effectively disable timeout in this test.
+        config::Options({{"memory_reserve_timeout", config::OptionValue("1 min")}}),
+        MemoryType::DEVICE,
+        ctx->executor(),
+        ctx->br()
+    };
 
     // Round 1: create a request, then make memory available.
     set_mem_avail(0);
-    std::vector<Node> nodes1;
-    nodes1.push_back([](MemoryReserveOrWait& mrow) -> Node {
+    std::vector<Actor> actors1;
+    actors1.push_back([](MemoryReserveOrWait& mrow) -> Actor {
         auto res = co_await mrow.reserve_or_wait(10, 0);
         EXPECT_EQ(res.size(), 10);
     }(mrow));
 
-    std::thread thd1(run_streaming_pipeline, std::move(nodes1));
+    std::thread thd1(run_actor_network, std::move(actors1));
     while (mrow.size() < 1) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -183,13 +228,13 @@ TEST_P(StreamingMemoryReserveOrWait, RestartPeriodicTask) {
 
     // Round 2: make memory unavailable again, submit a new request, then satisfy it.
     set_mem_avail(0);
-    std::vector<Node> nodes2;
-    nodes2.push_back([](MemoryReserveOrWait& mrow) -> Node {
+    std::vector<Actor> actors2;
+    actors2.push_back([](MemoryReserveOrWait& mrow) -> Actor {
         auto res = co_await mrow.reserve_or_wait(10, 0);
         EXPECT_EQ(res.size(), 10);
     }(mrow));
 
-    std::thread thd2(run_streaming_pipeline, std::move(nodes2));
+    std::thread thd2(run_actor_network, std::move(actors2));
     while (mrow.size() < 1) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -202,18 +247,24 @@ TEST_P(StreamingMemoryReserveOrWait, NoDeadlockWhenSpawningWithStaleHandle) {
         GTEST_SKIP() << "Test runs very slow in valgrind";
     }
 
-    MemoryReserveOrWait mrow{MemoryType::DEVICE, ctx, std::chrono::milliseconds{50}};
+    MemoryReserveOrWait mrow{
+        // Use a very high timeout to effectively disable timeout in this test.
+        config::Options({{"memory_reserve_timeout", config::OptionValue("1 min")}}),
+        MemoryType::DEVICE,
+        ctx->executor(),
+        ctx->br()
+    };
 
     // Do multiple rounds to increase the chance we hit the "task exiting" window.
     for (int i = 0; i < 50; ++i) {
         set_mem_avail(0);
-        std::vector<Node> nodes;
-        nodes.push_back([](MemoryReserveOrWait& mrow) -> Node {
+        std::vector<Actor> actors;
+        actors.push_back([](MemoryReserveOrWait& mrow) -> Actor {
             auto res = co_await mrow.reserve_or_wait(10, 0);
             EXPECT_EQ(res.size(), 10);
         }(mrow));
 
-        std::thread thd(run_streaming_pipeline, std::move(nodes));
+        std::thread thd(run_actor_network, std::move(actors));
 
         while (mrow.size() < 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -227,10 +278,145 @@ TEST_P(StreamingMemoryReserveOrWait, OverbookOnTimeoutReportsOverbookingBytes) {
     // Start with no available memory so the request cannot be satisfied normally.
     set_mem_avail(0);
 
-    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Node {
-        MemoryReserveOrWait mrow{MemoryType::DEVICE, ctx, std::chrono::milliseconds{1}};
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        MemoryReserveOrWait mrow{
+            // Use a very small timeout to trigger timeout immediately.
+            config::Options({{"memory_reserve_timeout", config::OptionValue("1ns")}}),
+            MemoryType::DEVICE,
+            ctx->executor(),
+            ctx->br()
+        };
         auto [res, overbooked_bytes] = co_await mrow.reserve_or_wait_or_overbook(10, 0);
         EXPECT_EQ(res.size(), 10);
         EXPECT_EQ(overbooked_bytes, 10);
     }(ctx));
+}
+
+TEST_P(StreamingMemoryReserveOrWait, FailOnTimeoutThrowsOverflowError) {
+    // Start with no available memory so the request cannot be satisfied.
+    set_mem_avail(0);
+
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        MemoryReserveOrWait mrow{
+            // Use a very small timeout to trigger timeout immediately.
+            config::Options({{"memory_reserve_timeout", config::OptionValue("1ns")}}),
+            MemoryType::DEVICE,
+            ctx->executor(),
+            ctx->br()
+        };
+        EXPECT_THROW(
+            std::ignore = co_await mrow.reserve_or_wait_or_fail(10, 0),
+            rapidsmpf::reservation_error
+        );
+    }(ctx));
+}
+
+TEST_P(StreamingMemoryReserveOrWait, ReserveMemoryHelperWithOverbookingEnabled) {
+    // Start with no available memory so the request cannot be satisfied normally.
+    set_mem_avail(0);
+
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        // Request should succeed with overbooking enabled.
+        auto res = co_await reserve_memory(
+            ctx,
+            512,
+            0,  // net_memory_delta
+            MemoryType::DEVICE,
+            AllowOverbooking::YES
+        );
+        EXPECT_EQ(res.mem_type(), MemoryType::DEVICE);
+        EXPECT_EQ(res.size(), 512);
+    }(ctx));
+}
+
+TEST_P(StreamingMemoryReserveOrWait, ReserveMemoryHelperWithOverbookingDisabled) {
+    // Start with no available memory so the request cannot be satisfied.
+    set_mem_avail(0);
+
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        // Request should fail with overbooking disabled.
+        EXPECT_THROW(
+            std::ignore = co_await reserve_memory(
+                ctx,
+                512,
+                0,  // net_memory_delta
+                MemoryType::DEVICE,
+                AllowOverbooking::NO
+            ),
+            rapidsmpf::reservation_error
+        );
+    }(ctx));
+}
+
+TEST_P(StreamingMemoryReserveOrWait, ReserveMemoryHelperWhenMemoryAvailable) {
+    // Make memory available.
+    set_mem_avail(1024);
+
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        // Request should succeed without overbooking.
+        auto res = co_await reserve_memory(
+            ctx,
+            512,
+            0,  // net_memory_delta
+            MemoryType::DEVICE,
+            AllowOverbooking::NO
+        );
+        EXPECT_EQ(res.mem_type(), MemoryType::DEVICE);
+        EXPECT_EQ(res.size(), 512);
+    }(ctx));
+}
+
+TEST_P(StreamingMemoryReserveOrWait, ReserveMemoryHelperDefaultOverbookingEnabled) {
+    // Start with no available memory.
+    set_mem_avail(0);
+
+    // Create a new context with allow_overbooking_by_default set to true.
+    config::Options options{
+        {{"memory_reserve_timeout", config::OptionValue("1ns")},
+         {"allow_overbooking_by_default", config::OptionValue("true")}}
+    };
+    auto ctx_with_overbook = std::make_shared<Context>(
+        options, GlobalEnvironment->comm_->logger(), ctx->executor(), ctx->br()
+    );
+
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        // Request should succeed because default is to allow overbooking.
+        auto res = co_await reserve_memory(
+            ctx,
+            2048,
+            0,  // net_memory_delta
+            MemoryType::DEVICE,
+            std::nullopt  // Use default from configuration
+        );
+        EXPECT_EQ(res.mem_type(), MemoryType::DEVICE);
+        EXPECT_EQ(res.size(), 2048);
+    }(ctx_with_overbook));
+}
+
+TEST_P(StreamingMemoryReserveOrWait, ReserveMemoryHelperDefaultOverbookingDisabled) {
+    // Start with no available memory.
+    set_mem_avail(0);
+
+    // Create a new context with allow_overbooking_by_default set to false.
+    config::Options options{
+        {{"memory_reserve_timeout", config::OptionValue("1ns")},
+         {"allow_overbooking_by_default", config::OptionValue("false")}}
+    };
+    auto ctx_with_no_overbook = std::make_shared<Context>(
+        options, GlobalEnvironment->comm_->logger(), ctx->executor(), ctx->br()
+    );
+
+    coro::sync_wait([](std::shared_ptr<Context> ctx) -> Actor {
+        // Request should fail because default is to disallow overbooking.
+        EXPECT_THROW(
+            std::ignore = co_await reserve_memory(
+                ctx,
+                2048,
+                0,  // net_memory_delta
+                MemoryType::DEVICE,
+                std::nullopt  // Use default from configuration
+            ),
+            rapidsmpf::reservation_error
+        );
+    }(ctx_with_no_overbook));
 }

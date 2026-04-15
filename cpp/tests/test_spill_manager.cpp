@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -17,7 +17,7 @@
 #include <rapidsmpf/memory/buffer.hpp>
 #include <rapidsmpf/memory/buffer_resource.hpp>
 #include <rapidsmpf/shuffler/shuffler.hpp>
-#include <rapidsmpf/utils.hpp>
+#include <rapidsmpf/utils/misc.hpp>
 
 #include "utils.hpp"
 
@@ -74,31 +74,4 @@ TEST(SpillManager, SpillFunction) {
     // A negative headroom is allowed.
     EXPECT_EQ(br.spill_manager().spill_to_make_headroom(-100_KiB), 0);
     EXPECT_EQ(br.memory_available(MemoryType::DEVICE)(), 100_KiB);
-}
-
-TEST(SpillManager, PeriodicSpillCheck) {
-    // Create a buffer resource that always trigger spilling (always reports
-    // negative available memory).
-    std::chrono::milliseconds period{1};
-    BufferResource br{
-        cudf::get_current_device_resource_ref(),
-        PinnedMemoryResource::Disabled,
-        {{MemoryType::DEVICE, []() -> std::int64_t { return -100_KiB; }}},
-        period,
-    };
-
-    // Spill function that increases `mem` for each call.
-    std::int64_t num_calls = 0;
-    SpillManager::SpillFunction func =
-        [&num_calls](std::size_t /* amount */) -> std::size_t { return ++num_calls; };
-    br.spill_manager().add_spill_function(func, 0);
-
-    std::this_thread::sleep_for(period * 100);
-    // With no overhead, we should see 100 spill calls but we allow wiggle room.
-    if (!is_running_under_valgrind()) {
-        EXPECT_THAT(num_calls, testing::AllOf(testing::Gt(10), testing::Lt(200)));
-    } else {
-        // In valgrind, we cannot expect it to run more than once.
-        EXPECT_THAT(num_calls, testing::AllOf(testing::Gt(1), testing::Lt(200)));
-    }
 }

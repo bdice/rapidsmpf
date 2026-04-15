@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -9,10 +9,10 @@
 #include <memory>
 #include <utility>
 
+#include <rapidsmpf/streaming/core/actor.hpp>
 #include <rapidsmpf/streaming/core/channel.hpp>
 #include <rapidsmpf/streaming/core/context.hpp>
 #include <rapidsmpf/streaming/core/coro_utils.hpp>
-#include <rapidsmpf/streaming/core/node.hpp>
 #include <rapidsmpf/streaming/core/queue.hpp>
 
 namespace rapidsmpf::streaming {
@@ -32,7 +32,7 @@ namespace rapidsmpf::streaming {
  * auto ctx = std::make_shared<Context>(...);
  * auto ch_out = ctx->create_channel();
  * auto linearise = std::make_shared<Lineariser>(ch_out, 8);
- * std::vector<Node> tasks;
+ * std::vector<Actor> tasks;
  * // Draining the lineariser will pull from all the input channels until they are
  * // shutdown and send to the output channel until it is consumed.
  * tasks.push_back(linearise->drain());
@@ -91,10 +91,11 @@ class Lineariser {
      * @note This coroutine should be awaited in a `coro::when_all` with all of the
      * producer tasks.
      */
-    Node drain() {
+    Actor drain() {
         ShutdownAtExit c{ch_out_};
         co_await ctx_->executor()->schedule();
-        while (!queues_.empty()) {
+        bool shutdown{false};
+        while (!(shutdown || queues_.empty())) {
             for (auto& q : queues_) {
                 auto [receipt, msg] = co_await q->receive();
                 if (msg.empty()) {
@@ -103,6 +104,7 @@ class Lineariser {
                 }
                 if (!co_await ch_out_->send(std::move(msg))) {
                     // Output channel is shut down, tell the producers to shutdown.
+                    shutdown = true;
                     break;
                 }
                 co_await receipt;

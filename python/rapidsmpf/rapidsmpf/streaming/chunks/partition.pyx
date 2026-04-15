@@ -1,18 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
 from libc.stdint cimport uint64_t
 from libcpp.memory cimport make_unique, unique_ptr
 from libcpp.utility cimport move
 
+from rapidsmpf._detail.exception_handling cimport ex_handler
+from rapidsmpf.memory.buffer_resource cimport BufferResource
 from rapidsmpf.streaming.core.message cimport Message, cpp_Message
 
 
 cdef extern from "<rapidsmpf/streaming/chunks/partition.hpp>" nogil:
     cpp_Message cpp_to_message"rapidsmpf::streaming::to_message"\
-        (uint64_t sequence_number, unique_ptr[cpp_PartitionMapChunk]) except +
+        (uint64_t sequence_number, unique_ptr[cpp_PartitionMapChunk]) \
+        except +ex_handler
     cpp_Message cpp_to_message"rapidsmpf::streaming::to_message"\
-        (uint64_t sequence_number, unique_ptr[cpp_PartitionVectorChunk]) except +
+        (uint64_t sequence_number, unique_ptr[cpp_PartitionVectorChunk]) \
+        except +ex_handler
 
 
 cdef class PartitionMapChunk:
@@ -25,7 +29,7 @@ cdef class PartitionMapChunk:
 
     @staticmethod
     cdef PartitionMapChunk from_handle(
-        unique_ptr[cpp_PartitionMapChunk] handle
+        unique_ptr[cpp_PartitionMapChunk] handle, BufferResource br
     ):
         """
         Construct a PartitionMapChunk from an existing C++ handle.
@@ -42,10 +46,11 @@ cdef class PartitionMapChunk:
 
         cdef PartitionMapChunk ret = PartitionMapChunk.__new__(PartitionMapChunk)
         ret._handle = move(handle)
+        ret._br = br
         return ret
 
     @staticmethod
-    def from_message(Message message not None):
+    def from_message(Message message not None, BufferResource br not None):
         """
         Construct a PartitionMapChunk by consuming a Message.
 
@@ -62,7 +67,8 @@ cdef class PartitionMapChunk:
         return PartitionMapChunk.from_handle(
             make_unique[cpp_PartitionMapChunk](
                 message._handle.release[cpp_PartitionMapChunk]()
-            )
+            ),
+            br,
         )
 
     def into_message(self, uint64_t sequence_number, Message message not None):
@@ -143,7 +149,7 @@ cdef class PartitionVectorChunk:
 
     @staticmethod
     cdef PartitionVectorChunk from_handle(
-        unique_ptr[cpp_PartitionVectorChunk] handle
+        unique_ptr[cpp_PartitionVectorChunk] handle, BufferResource br
     ):
         """
         Construct a PartitionVectorChunk from an existing C++ handle.
@@ -161,10 +167,11 @@ cdef class PartitionVectorChunk:
             PartitionVectorChunk
         )
         ret._handle = move(handle)
+        ret._br = br
         return ret
 
     @staticmethod
-    def from_message(Message message not None):
+    def from_message(Message message not None, BufferResource br not None):
         """
         Construct a PartitionVectorChunk by consuming a Message.
 
@@ -181,7 +188,8 @@ cdef class PartitionVectorChunk:
         return PartitionVectorChunk.from_handle(
             make_unique[cpp_PartitionVectorChunk](
                 message._handle.release[cpp_PartitionVectorChunk]()
-            )
+            ),
+            br,
         )
 
     def into_message(self, uint64_t sequence_number, Message message not None):

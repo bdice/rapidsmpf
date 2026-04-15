@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 """Dask-cuDF integration."""
 
@@ -141,13 +141,12 @@ class DaskCudfIntegration:
 
         assert ctx.br is not None
         column_names = options["column_names"]
-        shuffler.wait_on(partition_id)
+        shuffler.wait()
         table = unpack_and_concat(
             unspill_partitions(
                 shuffler.extract(partition_id),
                 br=ctx.br,
                 allow_overbooking=True,
-                statistics=ctx.statistics,
             ),
             br=ctx.br,
             stream=DEFAULT_STREAM,

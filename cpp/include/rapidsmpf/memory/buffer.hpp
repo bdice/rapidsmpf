@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -19,7 +19,8 @@
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/memory/host_buffer.hpp>
 #include <rapidsmpf/memory/memory_type.hpp>
-#include <rapidsmpf/utils.hpp>
+#include <rapidsmpf/statistics.hpp>
+#include <rapidsmpf/utils/misc.hpp>
 
 namespace rapidsmpf {
 
@@ -96,8 +97,8 @@ class Buffer {
      * Enqueuing work on any other stream without synchronizing with the buffer's
      * stream before and after the call is undefined behavior. In other words,
      * @p f must behave as a single stream-ordered operation, similar to issuing one
-     * `cudaMemcpyAsync` on the buffer's stream. For non-stream-aware integrations,
-     * use `exclusive_data_access()`.
+     * `rapidsmpf::cuda_memcpy_async` on the buffer's stream. For non-stream-aware
+     * integrations, use `exclusive_data_access()`.
      *
      * After @p f returns, an event is recorded on the buffer's stream, establishing
      * the new "latest write" for this buffer.
@@ -115,11 +116,10 @@ class Buffer {
      * // Snippet: copy data from `src_ptr` into `buffer` on the buffer's stream.
      * buffer.write_access([&](std::byte* buffer_ptr, rmm::cuda_stream_view stream) {
      *   assert(buffer.stream().value() == stream.value());
-     *   RAPIDSMPF_CUDA_TRY_ALLOC(cudaMemcpyAsync(
+     *   RAPIDSMPF_CUDA_TRY(rapidsmpf::cuda_memcpy_async(
      *       buffer_ptr,
      *       src_ptr,
      *       num_bytes,
-     *       cudaMemcpyDefault,
      *       stream
      *   ));
      * });
@@ -159,6 +159,10 @@ class Buffer {
      * Use this when integrating with non-stream-aware consumer APIs that require a
      * raw pointer and cannot be expressed as work on a CUDA stream (e.g., MPI, blocking
      * host I/O).
+     *
+     * @warning The `Buffer` does not track read access to its underlying storage, and so
+     * one should be aware of write-after-read anti-dependencies when obtaining exclusive
+     * access.
      *
      * @note Prefer `write_access(...)` if you can express the operation as a
      * single callable on a stream, even if that requires manually synchronizing the
@@ -202,6 +206,41 @@ class Buffer {
     }
 
     /**
+     * @brief Get the CUDA event that tracks the latest write into the buffer.
+     *
+     * @return The CUDA event that tracks the latest write into the buffer.
+     */
+    [[nodiscard]] CudaEvent const& latest_write_event() const noexcept {
+        return latest_write_event_;
+    }
+
+    /**
+     * @brief Rebind the buffer to a new CUDA stream.
+     *
+     * Changes the buffer's associated stream to @p new_stream and ensures proper
+     * synchronization: @p new_stream will wait for any pending work on the current
+     * stream before proceeding. The underlying storage stream (e.g., the stream of
+     * an `rmm::device_buffer` or `HostBuffer`) is also updated.
+     *
+     * @param new_stream The new CUDA stream.
+     *
+     * @throws std::logic_error If the buffer is locked.
+     *
+     * @code{.cpp}
+     * // Example: merge buffers from different streams onto a single stream.
+     * Buffer buffer_a = ...;  // associated with stream_a
+     * Buffer buffer_b = ...;  // associated with stream_b
+     *
+     * buffer_a.rebind_stream(merged_stream);
+     * buffer_b.rebind_stream(merged_stream);
+     *
+     * // Both buffers now use merged_stream with proper synchronization
+     * buffer_copy(buffer_a, buffer_b, size);
+     * @endcode
+     */
+    void rebind_stream(rmm::cuda_stream_view new_stream);
+
+    /**
      * @brief Check whether the buffer's most recent write has completed.
      *
      * Returns whether the CUDA event that tracks the most recent write into this
@@ -214,6 +253,11 @@ class Buffer {
      * races: another thread may enqueue additional writes after this returns `true`.
      * Ensure no further writes are enqueued, or establish stronger synchronization (e.g.,
      * synchronize the buffer's stream) before using the buffer.
+     *
+     * @warning This check only confirms that there are no pending _writes_ to the
+     * `Buffer`. Pending stream-ordered _reads_ from the `Buffer` are not tracked and
+     * therefore one should be aware of write-after-read anti-dependencies when using this
+     * check to pass from stream-ordered to non-stream-ordered code.
      *
      * @return `true` if the last recorded write event has completed; `false` otherwise.
      *
@@ -255,8 +299,11 @@ class Buffer {
      * @param mem_type The memory type of the underlying @p host_buffer.
      *
      * @throws std::invalid_argument If @p host_buffer is null.
-     * @throws std::invalid_argument If @p mem_type is not suitable for host buffers.
-     * @throws std::logic_error If the buffer is locked.
+     * @throws std::logic_error If the buffer is locked, or @p mem_type is not suitable
+     * for @p host_buffer (see warning for details).
+     *
+     * @warning The caller is responsible to ensure @p mem_type is suitable for @p
+     * host_buffer. An unsuitable memory type leads to an irrecoverable condition.
      */
     Buffer(
         std::unique_ptr<HostBuffer> host_buffer,
@@ -280,8 +327,11 @@ class Buffer {
      * @param mem_type The memory type of the underlying @p device_buffer.
      *
      * @throws std::invalid_argument If @p device_buffer is null.
-     * @throws std::invalid_argument If @p mem_type is not suitable for device buffers.
-     * @throws std::logic_error If the buffer is locked.
+     * @throws std::logic_error If the buffer is locked, or @p mem_type is not suitable
+     * for @p device_buffer (see warning for details).
+     *
+     * @warning The caller is responsible to ensure @p mem_type is suitable for @p
+     * device_buffer. An unsuitable memory type leads to an irrecoverable condition.
      */
     Buffer(std::unique_ptr<rmm::device_buffer> device_buffer, MemoryType mem_type);
 
@@ -326,17 +376,21 @@ class Buffer {
 /**
  * @brief Asynchronously copy data between buffers.
  *
- * Copies @p size bytes from @p src at @p src_offset into @p dst at @p dst_offset.
+ * Copies @p size bytes from @p src, starting at @p src_offset, into @p dst at
+ * @p dst_offset.
  *
+ * @param statistics Statistics object used to record the copy operation. Use
+ * `Statistics::disabled()` to skip recording.
  * @param dst Destination buffer.
  * @param src Source buffer.
  * @param size Number of bytes to copy.
- * @param dst_offset Offset (in bytes) into the destination buffer.
- * @param src_offset Offset (in bytes) into the source buffer.
+ * @param dst_offset Byte offset into the destination buffer.
+ * @param src_offset Byte offset into the source buffer.
  *
- * @throws std::invalid_argument If out of bounds.
+ * @throws std::invalid_argument If the requested range is out of bounds.
  */
 void buffer_copy(
+    std::shared_ptr<Statistics> statistics,
     Buffer& dst,
     Buffer const& src,
     std::size_t size,

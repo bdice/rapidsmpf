@@ -1,15 +1,18 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 #include <rapidsmpf/cuda_stream.hpp>
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/memory/buffer_resource.hpp>
 #include <rapidsmpf/memory/host_buffer.hpp>
+#include <rapidsmpf/stream_ordered_timing.hpp>
+#include <rapidsmpf/utils/string.hpp>
 
 namespace rapidsmpf {
 
@@ -50,21 +53,63 @@ BufferResource::BufferResource(
     RAPIDSMPF_EXPECTS(statistics_ != nullptr, "the statistics pointer cannot be NULL");
 }
 
-std::pair<MemoryReservation, std::size_t> BufferResource::reserve(
-    MemoryType mem_type, std::size_t size, bool allow_overbooking
+std::shared_ptr<BufferResource> BufferResource::from_options(
+    RmmResourceAdaptor* mr, config::Options options
 ) {
+    auto pinned_mr = PinnedMemoryResource::from_options(options);
+    auto mem_available = memory_available_from_options(mr, options);
+
+    if (pinned_mr != PinnedMemoryResource::Disabled) {
+        mem_available[MemoryType::PINNED_HOST] = pinned_mr->get_memory_available_cb();
+    }
+
+    auto statistics = Statistics::from_options(mr, options, pinned_mr);
+    return std::make_shared<BufferResource>(
+        mr,
+        std::move(pinned_mr),
+        std::move(mem_available),
+        periodic_spill_check_from_options(options),
+        stream_pool_from_options(options),
+        std::move(statistics)
+    );
+}
+
+rmm::device_async_resource_ref BufferResource::device_mr() const noexcept {
+    return device_mr_;
+}
+
+rmm::host_async_resource_ref BufferResource::host_mr() noexcept {
+    return host_mr_;
+}
+
+rmm::host_async_resource_ref BufferResource::pinned_mr() {
+    RAPIDSMPF_EXPECTS(
+        pinned_mr_, "no pinned memory resource is available", std::invalid_argument
+    );
+    return *pinned_mr_;
+}
+
+std::pair<MemoryReservation, std::size_t> BufferResource::reserve(
+    MemoryType mem_type, std::size_t size, AllowOverbooking allow_overbooking
+) {
+    RAPIDSMPF_EXPECTS(
+        mem_type != MemoryType::PINNED_HOST
+            || pinned_mr_ != PinnedMemoryResource::Disabled,
+        "pinned memory resource is not available",
+        std::invalid_argument
+    );
+
     auto const& available = memory_available(mem_type);
     std::lock_guard<std::mutex> lock(mutex_);
     std::size_t& reserved = memory_reserved_[static_cast<std::size_t>(mem_type)];
 
     // Calculate the available memory _after_ the memory has been reserved.
     std::int64_t headroom =
-        available()
-        - (static_cast<std::int64_t>(reserved) + static_cast<std::int64_t>(size));
+        available() - (safe_cast<std::int64_t>(reserved) + safe_cast<std::int64_t>(size));
     // If negative, we are overbooking.
     std::size_t overbooking =
-        headroom < 0 ? static_cast<std::size_t>(std::abs(headroom)) : 0;
-    if (overbooking > 0 && !allow_overbooking) {
+        headroom < 0 ? safe_cast<std::size_t>(std::abs(headroom)) : 0;
+    if (overbooking > 0 && allow_overbooking == AllowOverbooking::NO) {
         // Cancel the reservation, overbooking isn't allowed.
         return {MemoryReservation(mem_type, this, 0), overbooking};
     }
@@ -74,20 +119,20 @@ std::pair<MemoryReservation, std::size_t> BufferResource::reserve(
 }
 
 MemoryReservation BufferResource::reserve_device_memory_and_spill(
-    size_t size, bool allow_overbooking
+    std::size_t size, AllowOverbooking allow_overbooking
 ) {
     // reserve device memory with overbooking
-    auto [reservation, ob] = reserve(MemoryType::DEVICE, size, true);
+    auto [reservation, ob] = reserve(MemoryType::DEVICE, size, AllowOverbooking::YES);
 
     // ask the spill manager to make room for overbooking
     if (ob > 0) {
         auto spilled = spill_manager_.spill(ob);
         RAPIDSMPF_EXPECTS(
-            allow_overbooking || spilled >= ob,
+            allow_overbooking == AllowOverbooking::YES || spilled >= ob,
             "failed to spill enough memory (reserved: " + format_nbytes(size)
                 + ", overbooking: " + format_nbytes(ob)
                 + ", spilled: " + format_nbytes(spilled) + ")",
-            std::overflow_error
+            rapidsmpf::reservation_error
         );
     }
 
@@ -100,7 +145,7 @@ std::size_t BufferResource::release(MemoryReservation& reservation, std::size_t 
         size <= reservation.size_,
         "MemoryReservation(" + format_nbytes(reservation.size_) + ") isn't big enough ("
             + format_nbytes(size) + ")",
-        std::overflow_error
+        rapidsmpf::reservation_error
     );
     std::size_t& reserved =
         memory_reserved_[static_cast<std::size_t>(reservation.mem_type_)];
@@ -112,8 +157,10 @@ std::size_t BufferResource::release(MemoryReservation& reservation, std::size_t 
 std::unique_ptr<Buffer> BufferResource::allocate(
     std::size_t size, rmm::cuda_stream_view stream, MemoryReservation& reservation
 ) {
+    auto const mem_type = reservation.mem_type_;
+    StreamOrderedTiming timing{stream, statistics_};
     std::unique_ptr<Buffer> ret;
-    switch (reservation.mem_type_) {
+    switch (mem_type) {
     case MemoryType::HOST:
         ret = std::unique_ptr<Buffer>(new Buffer(
             std::make_unique<HostBuffer>(size, stream, host_mr()),
@@ -138,6 +185,7 @@ std::unique_ptr<Buffer> BufferResource::allocate(
         RAPIDSMPF_FAIL("MemoryType: unknown");
     }
     release(reservation, size);
+    statistics_->record_alloc(mem_type, size, std::move(timing));
     return ret;
 }
 
@@ -162,8 +210,9 @@ std::unique_ptr<Buffer> BufferResource::move(
     std::unique_ptr<Buffer> buffer, MemoryReservation& reservation
 ) {
     if (reservation.mem_type_ != buffer->mem_type()) {
-        auto ret = allocate(buffer->size, buffer->stream(), reservation);
-        buffer_copy(*ret, *buffer, buffer->size);
+        auto const nbytes = buffer->size;
+        auto ret = allocate(nbytes, buffer->stream(), reservation);
+        buffer_copy(statistics_, *ret, *buffer, nbytes);
         return ret;
     }
     return buffer;
@@ -208,6 +257,52 @@ SpillManager& BufferResource::spill_manager() {
 
 std::shared_ptr<Statistics> BufferResource::statistics() {
     return statistics_;
+}
+
+std::unordered_map<MemoryType, BufferResource::MemoryAvailable>
+memory_available_from_options(RmmResourceAdaptor* mr, config::Options options) {
+    // Create a memory availability map that limits device memory based on the
+    // `spill_device_limit` option.
+    return {
+        {MemoryType::DEVICE,
+         LimitAvailableMemory{
+             mr, options.get<std::int64_t>("spill_device_limit", [](auto const& s) {
+                 auto const [_, total_mem] = rmm::available_device_memory();
+                 return rmm::align_down(
+                     parse_nbytes_or_percent(s.empty() ? "80%" : s, total_mem),
+                     rmm::CUDA_ALLOCATION_ALIGNMENT
+                 );
+             })
+         }}
+    };
+}
+
+std::optional<Duration> periodic_spill_check_from_options(config::Options options) {
+    return options.get<std::optional<Duration>>(
+        "periodic_spill_check", [](auto const& s) -> std::optional<Duration> {
+            if (s.empty()) {
+                return parse_duration("1ms");
+            }
+            if (auto val = parse_optional(s); val.has_value()) {
+                return parse_duration(val.value());
+            }
+            return std::nullopt;
+        }
+    );
+}
+
+std::shared_ptr<rmm::cuda_stream_pool> stream_pool_from_options(config::Options options) {
+    auto const num_streams = options.get<std::size_t>("num_streams", [](auto const& s) {
+        return s.empty() ? 16 : parse_string<std::size_t>(s);
+    });
+    RAPIDSMPF_EXPECTS(
+        num_streams > 0,
+        "The `num_streams` option must be greater than 0",
+        std::invalid_argument
+    );
+    return std::make_shared<rmm::cuda_stream_pool>(
+        num_streams, rmm::cuda_stream::flags::non_blocking
+    );
 }
 
 }  // namespace rapidsmpf

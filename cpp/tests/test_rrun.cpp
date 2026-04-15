@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -7,7 +7,8 @@
  * @brief GTest for validating topology-based binding in rrun.
  *
  * This test validates that when running under rrun, the CPU affinity, NUMA memory
- * binding, and UCX_NET_DEVICES match what TopologyDiscovery reports for the assigned GPU.
+ * binding, and UCX_NET_DEVICES match what cucascade::memory::topology_discovery reports
+ * for the assigned GPU.
  *
  * These tests must be run with rrun, e.g.:
  *   rrun -n 1 gtests/single_tests --gtest_filter="*TopologyBinding*"
@@ -23,18 +24,16 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cucascade/memory/topology_discovery.hpp>
+
 #include <rapidsmpf/bootstrap/utils.hpp>
-#include <rapidsmpf/topology_discovery.hpp>
+#include <rapidsmpf/system_info.hpp>
 
 class TopologyBindingTest : public ::testing::Test {
   protected:
     void SetUp() override {
         if (!rapidsmpf::bootstrap::is_running_with_rrun()) {
-            GTEST_SKIP() << "Test must be run with rrun (RAPIDSMPF_RANK not set)";
-        }
-
-        if (!discovery_.discover()) {
-            GTEST_SKIP() << "Failed to discover topology";
+            GTEST_SKIP() << "Test must be run with rrun (RRUN_RANK not set)";
         }
 
         gpu_id_ = rapidsmpf::bootstrap::get_gpu_id();
@@ -42,11 +41,32 @@ class TopologyBindingTest : public ::testing::Test {
             GTEST_SKIP() << "Could not determine GPU ID from CUDA_VISIBLE_DEVICES.";
         }
 
+        // Temporarily clear CUDA_VISIBLE_DEVICES so topology discovery sees
+        // all physical GPUs, not just the one rrun narrowed the variable to.
+        char const* cvd = std::getenv("CUDA_VISIBLE_DEVICES");
+        std::string saved_cvd;
+        bool had_cvd = false;
+        if (cvd != nullptr) {
+            had_cvd = true;
+            saved_cvd = cvd;
+            unsetenv("CUDA_VISIBLE_DEVICES");
+        }
+
+        bool ok = discovery_.discover();
+
+        if (had_cvd) {
+            setenv("CUDA_VISIBLE_DEVICES", saved_cvd.c_str(), 1);
+        }
+
+        if (!ok) {
+            GTEST_SKIP() << "Failed to discover topology";
+        }
+
         auto const& topology = discovery_.get_topology();
         auto it = std::find_if(
             topology.gpus.begin(),
             topology.gpus.end(),
-            [this](rapidsmpf::GpuTopologyInfo const& gpu) {
+            [this](cucascade::memory::gpu_topology_info const& gpu) {
                 return static_cast<int>(gpu.id) == gpu_id_;
             }
         );
@@ -58,9 +78,9 @@ class TopologyBindingTest : public ::testing::Test {
         expected_gpu_info_ = *it;
     }
 
-    rapidsmpf::TopologyDiscovery discovery_;
+    cucascade::memory::topology_discovery discovery_;
     int gpu_id_{-1};
-    rapidsmpf::GpuTopologyInfo expected_gpu_info_;
+    cucascade::memory::gpu_topology_info expected_gpu_info_;
 };
 
 TEST_F(TopologyBindingTest, CpuAffinity) {
@@ -82,7 +102,7 @@ TEST_F(TopologyBindingTest, CpuAffinity) {
 }
 
 TEST_F(TopologyBindingTest, NumaBinding) {
-    std::vector<int> actual_numa_nodes = rapidsmpf::bootstrap::get_current_numa_nodes();
+    std::vector<int> actual_numa_nodes = rapidsmpf::get_current_numa_nodes();
     std::vector<int> expected_memory_binding = expected_gpu_info_.memory_binding;
 
     if (expected_memory_binding.empty()) {
@@ -92,7 +112,7 @@ TEST_F(TopologyBindingTest, NumaBinding) {
     if (actual_numa_nodes.empty()) {
         std::ostringstream oss;
         oss << "No NUMA nodes detected, but expected binding to: [";
-        for (size_t i = 0; i < expected_memory_binding.size(); ++i) {
+        for (std::size_t i = 0; i < expected_memory_binding.size(); ++i) {
             if (i > 0)
                 oss << ",";
             oss << expected_memory_binding[i];
@@ -118,14 +138,14 @@ TEST_F(TopologyBindingTest, NumaBinding) {
 
     EXPECT_TRUE(found) << "NUMA binding mismatch for GPU " << gpu_id_ << "\n"
                        << "  Expected: [";
-    for (size_t i = 0; i < expected_memory_binding.size(); ++i) {
+    for (std::size_t i = 0; i < expected_memory_binding.size(); ++i) {
         if (i > 0)
             std::cout << ",";
         std::cout << expected_memory_binding[i];
     }
     std::cout << "]\n"
               << "  Actual:   [";
-    for (size_t i = 0; i < actual_numa_nodes.size(); ++i) {
+    for (std::size_t i = 0; i < actual_numa_nodes.size(); ++i) {
         if (i > 0)
             std::cout << ",";
         std::cout << actual_numa_nodes[i];
@@ -144,7 +164,7 @@ TEST_F(TopologyBindingTest, UcxNetDevices) {
 
     // Convert expected network devices to comma-separated string
     std::string expected_ucx_devices;
-    for (size_t i = 0; i < expected_network_devices.size(); ++i) {
+    for (std::size_t i = 0; i < expected_network_devices.size(); ++i) {
         if (i > 0)
             expected_ucx_devices += ",";
         expected_ucx_devices += expected_network_devices[i];
@@ -162,7 +182,7 @@ TEST_F(TopologyBindingTest, UcxNetDevices) {
 
 TEST_F(TopologyBindingTest, AllBindings) {
     std::string actual_cpu_affinity = rapidsmpf::bootstrap::get_current_cpu_affinity();
-    std::vector<int> actual_numa_nodes = rapidsmpf::bootstrap::get_current_numa_nodes();
+    std::vector<int> actual_numa_nodes = rapidsmpf::get_current_numa_nodes();
     std::string actual_ucx_net_devices = rapidsmpf::bootstrap::get_ucx_net_devices();
 
     // Check CPU affinity
@@ -196,7 +216,7 @@ TEST_F(TopologyBindingTest, AllBindings) {
     // Check UCX network devices
     if (!expected_gpu_info_.network_devices.empty()) {
         std::string expected_ucx_devices;
-        for (size_t i = 0; i < expected_gpu_info_.network_devices.size(); ++i) {
+        for (std::size_t i = 0; i < expected_gpu_info_.network_devices.size(); ++i) {
             if (i > 0)
                 expected_ucx_devices += ",";
             expected_ucx_devices += expected_gpu_info_.network_devices[i];

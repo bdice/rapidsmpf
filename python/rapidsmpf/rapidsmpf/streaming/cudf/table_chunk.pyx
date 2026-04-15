@@ -1,26 +1,33 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
 from cpython.object cimport PyObject
+from cython cimport no_gc_clear
 from cython.operator cimport dereference as deref
-from libc.stdint cimport uint64_t
-from libcpp.memory cimport unique_ptr
+from libc.stdint cimport int64_t, uint64_t
+from libcpp.memory cimport make_unique, unique_ptr
 from libcpp.utility cimport move
 from pylibcudf.libcudf.table.table_view cimport table_view as cpp_table_view
 from pylibcudf.table cimport Table
 
+from rapidsmpf._detail.exception_handling cimport ex_handler
 from rapidsmpf.memory.buffer_resource cimport BufferResource
 from rapidsmpf.memory.memory_reservation cimport (MemoryReservation,
                                                   cpp_MemoryReservation)
+from rapidsmpf.memory.packed_data cimport PackedData
 # Need the header include for inline C++ code
 from rapidsmpf.owning_wrapper cimport cpp_OwningWrapper  # no-cython-lint
 from rapidsmpf.streaming.chunks.utils cimport py_deleter
+from rapidsmpf.streaming.core.context cimport Context
 from rapidsmpf.streaming.core.message cimport Message, cpp_Message
+
+from rapidsmpf.memory.buffer import MemoryType as py_MemoryType
+from rapidsmpf.streaming.core.memory_reserve_or_wait import reserve_memory
 
 
 cdef extern from "<rapidsmpf/streaming/cudf/table_chunk.hpp>" nogil:
     cpp_Message cpp_to_message"rapidsmpf::streaming::to_message"\
-        (uint64_t sequence_number, unique_ptr[cpp_TableChunk]) except +
+        (uint64_t sequence_number, unique_ptr[cpp_TableChunk]) except +ex_handler
 
 
 cdef extern from * nogil:
@@ -72,19 +79,21 @@ cdef extern from * nogil:
             table->copy(*reservation)
         );
     }
-    }
+    }  // namespace
     """
     unique_ptr[cpp_TableChunk] cpp_release_table_chunk_from_message(
         cpp_Message
-    ) except +
-    unique_ptr[cpp_TableChunk] cpp_from_table_view_with_owner(...) except +
+    ) except +ex_handler
+    unique_ptr[cpp_TableChunk] cpp_from_table_view_with_owner(...) except +ex_handler
     unique_ptr[cpp_TableChunk] cpp_table_make_available(
         unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
-    ) except +
+    ) except +ex_handler
     unique_ptr[cpp_TableChunk] cpp_table_copy(
         unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
-    ) except +
+    ) except +ex_handler
 
+
+@no_gc_clear
 cdef class TableChunk:
     """
     A unit of table data in a streaming pipeline.
@@ -107,7 +116,9 @@ cdef class TableChunk:
             self._handle.reset()
 
     @staticmethod
-    cdef TableChunk from_handle(unique_ptr[cpp_TableChunk] handle):
+    cdef TableChunk from_handle(
+        unique_ptr[cpp_TableChunk] handle, BufferResource br,
+    ):
         """
         Construct a TableChunk from an existing C++ handle.
 
@@ -115,6 +126,8 @@ cdef class TableChunk:
         ----------
         handle
             A unique pointer to a C++ TableChunk.
+        br
+            An optional BufferResource to keep alive.
 
         Returns
         -------
@@ -122,6 +135,7 @@ cdef class TableChunk:
         """
         cdef TableChunk ret = TableChunk.__new__(TableChunk)
         ret._handle = move(handle)
+        ret._br = br
         return ret
 
     @staticmethod
@@ -130,6 +144,7 @@ cdef class TableChunk:
         Stream stream not None,
         *,
         bool_t exclusive_view,
+        BufferResource br not None,
     ):
         """
         Construct a TableChunk from a pylibcudf Table.
@@ -164,10 +179,6 @@ cdef class TableChunk:
         This reference is managed by the underlying C++ object, so it
         persists even when the chunk is transferred through Channels.
 
-        Warning
-        -------
-        This object does not keep the provided stream alive. The caller must
-        ensure the stream remains valid for the lifetime of the streaming pipeline.
         """
         cdef cuda_stream_view _stream = stream.view()
         cdef cpp_table_view view = table.view()
@@ -178,11 +189,32 @@ cdef class TableChunk:
                 <PyObject *>table,
                 py_deleter,
                 exclusive_view,
-            )
+            ),
+            br,
         )
 
     @staticmethod
-    def from_message(Message message not None):
+    def from_packed_data(PackedData pd not None, BufferResource br not None):
+        """
+        Construct a TableChunk from packed data.
+
+        Parameters
+        ----------
+        pd
+            The PackedData object
+
+        Returns
+        -------
+        A new TableChunk owning the packed data.
+
+        Notes
+        -----
+        This takes ownership of the data in the PackedData object, which is left empty.
+        """
+        return TableChunk.from_handle(make_unique[cpp_TableChunk](move(pd.c_obj)), br)
+
+    @staticmethod
+    def from_message(Message message not None, BufferResource br not None):
         """
         Construct a TableChunk by consuming a Message.
 
@@ -197,7 +229,8 @@ cdef class TableChunk:
         A new TableChunk extracted from the given message.
         """
         return TableChunk.from_handle(
-            cpp_release_table_chunk_from_message(move(message._handle))
+            cpp_release_table_chunk_from_message(move(message._handle)),
+            br,
         )
 
     def into_message(self, uint64_t sequence_number, Message message not None):
@@ -281,19 +314,22 @@ cdef class TableChunk:
             deref(self.handle_ptr()).stream().value()
         )
 
-    def data_alloc_size(self, MemoryType mem_type):
+    def data_alloc_size(self, mem_type=None):
         """
         Number of bytes allocated for the data in the specified memory type.
 
         Parameters
         ----------
         mem_type
-            The memory type to query.
+            The memory type to query. If None, returns the total size across
+            all memory types.
 
         Returns
         -------
         Number of bytes allocated.
         """
+        if mem_type is None:
+            return sum(self.data_alloc_size(m) for m in py_MemoryType)
         return deref(self.handle_ptr()).data_alloc_size(mem_type)
 
     def is_available(self):
@@ -324,9 +360,7 @@ cdef class TableChunk:
         Move this table chunk into a new one with its data made available.
 
         As part of the move, a copy or unpack operation may be performed,
-        using the associated CUDA stream for execution. After this call,
-        the current object is left in a moved-from state and should not be
-        accessed further except for reassignment, movement, or destruction.
+        using the associated CUDA stream for execution.
 
         Parameters
         ----------
@@ -347,7 +381,48 @@ cdef class TableChunk:
         cdef unique_ptr[cpp_TableChunk] ret
         with nogil:
             ret = cpp_table_make_available(move(handle), res)
-        return TableChunk.from_handle(move(ret))
+        return TableChunk.from_handle(move(ret), self._br)
+
+    async def make_available_or_wait(
+        self, Context ctx not None, *, int64_t net_memory_delta
+    ):
+        """
+        Move this table chunk into a new one with its data made available.
+
+        This is an asynchronous variant of :meth:`make_available`. The coroutine may
+        suspend if the required device memory is not immediately available and
+        resumes once a memory reservation has been granted or an error condition is
+        reached.
+
+        Parameters
+        ----------
+        ctx
+            Streaming context used to access the memory reservation mechanism.
+        net_memory_delta
+            Estimated change in memory usage after the reservation is granted and
+            all work using the returned table chunk has completed.
+
+        Returns
+        -------
+        A new table chunk with its data available on device.
+
+        Raises
+        ------
+        RuntimeError
+            If shutdown occurs before the reservation can be processed.
+        OverflowError
+            If no progress is possible within the timeout and overbooking is
+            disabled.
+
+        Warnings
+        --------
+        The original table chunk is released and must not be used after this call.
+        """
+        return self.make_available(
+            await reserve_memory(
+                ctx, self.make_available_cost(), net_memory_delta=net_memory_delta
+            )
+        )
 
     def make_available_and_spill(
         self, BufferResource br not None, *, allow_overbooking
@@ -373,7 +448,7 @@ cdef class TableChunk:
 
         Raises
         ------
-        MemoryError
+        ReservationError
             If the allocation or spilling process fails to free enough memory.
 
         Warnings
@@ -457,4 +532,95 @@ cdef class TableChunk:
         cdef cpp_MemoryReservation* res = reservation._handle.get()
         with nogil:
             ret = cpp_table_copy(self._handle, res)
-        return TableChunk.from_handle(move(ret))
+        return TableChunk.from_handle(move(ret), self._br)
+
+    @property
+    def shape(self):
+        """Return the shape of the table in this TableChunk.
+
+        Returns
+        -------
+        Tuple of shape ``(num_rows, num_columns)```.
+        """
+        return deref(self._handle).shape()
+
+
+async def make_table_chunks_available_or_wait(
+    Context ctx not None,
+    chunks,
+    *,
+    size_t reserve_extra,
+    int64_t net_memory_delta,
+    allow_overbooking=None,
+):
+    """
+    Make one or more table chunks available, waiting on a memory reservation if needed.
+
+    This helper combines :meth:`TableChunk.make_available` with :func:`reserve_memory`.
+    It computes the device-memory cost of making the provided table chunks available,
+    reserves that amount (plus ``reserve_extra``), and then returns new table chunks
+    whose data are available on device.
+
+    The coroutine may suspend if the required device memory is not immediately
+    available and resumes once a memory reservation has been granted or an error
+    condition is reached. The behavior when the progress timeout expires depends
+    on whether overbooking is allowed.
+
+    Parameters
+    ----------
+    ctx
+        Streaming context used to access the memory reservation mechanism.
+    chunks
+        A table chunk or an iterable of table chunks to make available on device.
+    reserve_extra
+        Additional bytes to include in the reservation beyond the aggregated
+        availability cost of ``chunks``.
+    net_memory_delta
+        Estimated change in memory usage after the reservation is granted and all
+        work using the returned table chunks has completed. This value is used as
+        a heuristic to prioritize eligible requests.
+    allow_overbooking
+        Whether to allow overbooking if no progress is possible.
+          - If ``True``, the reservation may overbook memory when no further
+            progress can be made. If ``False``, the call fails when no progress
+            is possible.
+          - If ``None``, the behavior is determined by the configuration option
+            ``"allow_overbooking_by_default"``, which is read via ``ctx.options()``.
+
+    Returns
+    -------
+    A tuple containing:
+      - If a chunk is provided: the new table chunk with its data available on device.
+      - If multiple chunks are provided: a list of new table chunks with their data
+        available on device.
+      - The memory reservation used with a remaining size of @p reserve_extra.
+
+    Raises
+    ------
+    RuntimeError
+        If shutdown occurs before the reservation can be processed.
+    OverflowError
+        If no progress is possible within the timeout and overbooking is disabled.
+
+    Warnings
+    --------
+    The original table chunks are released and must not be used after this call.
+    """
+    # Handle both single chunk and iterable of chunks
+    input_chunks = chunks
+    if isinstance(input_chunks, TableChunk):
+        chunks = (input_chunks,)
+
+    size = sum(chunk.make_available_cost() for chunk in chunks)
+    res = await reserve_memory(
+        ctx,
+        size + reserve_extra,
+        net_memory_delta=net_memory_delta,
+        mem_type=MemoryType.DEVICE,
+        allow_overbooking=allow_overbooking,
+    )
+    available_chunks = [chunk.make_available(res) for chunk in chunks]
+    if isinstance(input_chunks, TableChunk):
+        return available_chunks[0], res
+    else:
+        return available_chunks, res

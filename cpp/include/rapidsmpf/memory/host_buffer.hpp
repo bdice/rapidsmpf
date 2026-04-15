@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -34,9 +34,9 @@ class HostBuffer {
      *
      * This deleter holds a callable that releases the underlying storage when invoked.
      * It enables `HostBuffer` to take ownership of different storage types
-     * (e.g., `rmm::device_buffer`, `std::vector<uint8_t>`) without exposing their types.
-     * The deleter captures the owned object and destroys it when the deleter itself
-     * is destroyed (the `void*` parameter is ignored).
+     * (e.g., `rmm::device_buffer`, `std::vector<std::uint8_t>`) without exposing their
+     * types. The deleter captures the owned object and destroys it when the deleter
+     * itself is destroyed (the `void*` parameter is ignored).
      */
     using OwnedStorageDeleter = std::function<void(void*)>;
 
@@ -137,6 +137,19 @@ class HostBuffer {
     [[nodiscard]] std::vector<std::uint8_t> copy_to_uint8_vector() const;
 
     /**
+     * @brief Set the associated CUDA stream.
+     *
+     * This function only updates the buffer's associated CUDA stream. It does not
+     * perform any stream synchronization or establish ordering guarantees between
+     * the previous stream and @p stream. Callers must ensure that any work
+     * previously enqueued on the old stream that may access the buffer has completed
+     * or is otherwise properly synchronized before switching streams.
+     *
+     * @param stream The new CUDA stream.
+     */
+    void set_stream(rmm::cuda_stream_view stream);
+
+    /**
      * @brief Construct a `HostBuffer` by copying data from a `std::vector<std::uint8_t>`.
      *
      * A new buffer is allocated using the provided memory resource and stream.
@@ -190,8 +203,12 @@ class HostBuffer {
      *
      * @return A new `HostBuffer` owning the device buffer's memory.
      *
-     * @throws std::invalid_argument if `pinned_host_buffer` is null or if the memory type
-     * of the buffer is not pinned host.
+     * @throws std::invalid_argument if @p pinned_host_buffer is null.
+     * @throws std::logic_error if @p pinned_host_buffer is not of pinned memory host
+     * memory type (see warning for details).
+     *
+     * @warning The caller is responsible to ensure @p pinned_host_buffer is of pinned
+     * host memory type. If non-pinned host buffer leads to an irrecoverable condition.
      */
     static HostBuffer from_rmm_device_buffer(
         std::unique_ptr<rmm::device_buffer> pinned_host_buffer,
