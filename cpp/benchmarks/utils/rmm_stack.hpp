@@ -54,9 +54,8 @@ struct RmmStack {
     } else if (name == "managed") {
         stack->resource.emplace<rmm::mr::managed_memory_resource>();
     } else if (name == "pool") {
-        rmm::mr::cuda_memory_resource cuda_mr;
         stack->resource.emplace<rmm::mr::pool_memory_resource>(
-            cuda_mr,
+            rmm::mr::cuda_memory_resource{},
             rmm::percent_of_free_device_memory(80),
             rmm::percent_of_free_device_memory(80)
         );
