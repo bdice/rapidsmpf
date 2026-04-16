@@ -68,8 +68,8 @@ class BufferResource {
     /**
      * @brief Constructs a buffer resource.
      *
-     * @param device_mr Reference to the RMM device memory resource used for device
-     * allocations.
+     * @param device_mr The RMM device memory resource used for device allocations.
+     * Ownership is transferred to the BufferResource.
      * @param pinned_mr The pinned host memory resource used for `MemoryType::PINNED_HOST`
      * allocations. If null, pinned host allocations are disabled. In that case, any
      * attempt to allocate pinned memory will fail regardless of what @p memory_available
@@ -87,7 +87,7 @@ class BufferResource {
      * @param statistics The statistics instance to use (disabled by default).
      */
     BufferResource(
-        rmm::device_async_resource_ref device_mr,
+        cuda::mr::any_resource<cuda::mr::device_accessible> device_mr,
         std::shared_ptr<PinnedMemoryResource> pinned_mr = PinnedMemoryResource::Disabled,
         std::unordered_map<MemoryType, MemoryAvailable> memory_available = {},
         std::optional<Duration> periodic_spill_check = std::chrono::milliseconds{1},
@@ -395,7 +395,7 @@ class BufferResource {
 
   private:
     std::mutex mutex_;
-    rmm::device_async_resource_ref device_mr_;
+    cuda::mr::any_resource<cuda::mr::device_accessible> device_mr_;
     std::shared_ptr<PinnedMemoryResource> pinned_mr_;
     HostMemoryResource host_mr_;
     std::unordered_map<MemoryType, MemoryAvailable> memory_available_;

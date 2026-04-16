@@ -45,8 +45,9 @@ class RmmResourceAdaptor
      * @param fallback_mr Optional fallback memory resource.
      */
     RmmResourceAdaptor(
-        rmm::device_async_resource_ref primary_mr,
-        std::optional<rmm::device_async_resource_ref> fallback_mr = std::nullopt
+        cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr,
+        std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>> fallback_mr =
+            std::nullopt
     );
 
     ~RmmResourceAdaptor() = default;

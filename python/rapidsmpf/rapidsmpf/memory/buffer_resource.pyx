@@ -15,6 +15,7 @@ from rmm.librmm.cuda_stream_pool cimport cuda_stream_pool
 
 from rmm.pylibrmm import CudaStreamFlags
 
+from rmm.librmm.memory_resource cimport make_any_device_resource
 from rmm.pylibrmm.cuda_stream_pool cimport CudaStreamPool
 from rmm.pylibrmm.memory_resource cimport DeviceMemoryResource
 
@@ -219,10 +220,8 @@ cdef class BufferResource:
         # checked cast requires the GIL
         stats_handle = (<Statistics?>statistics)._handle
 
-        # Keep MR alive because the C++ BufferResource stores a raw pointer.
-        # TODO: once RMM is migrating to CCCL (copyable) any_resource,
-        # rather than the any_resource_ref reference type, we don't
-        # need to keep this alive here.
+        # Stored for the Python device_mr/pinned_mr property accessors.
+        # The C++ BufferResource owns the resource via any_resource.
         self._device_mr = device_mr
         self._pinned_mr = pinned_mr
         cdef shared_ptr[cpp_PinnedMemoryResource] cpp_pinned_mr
@@ -230,7 +229,7 @@ cdef class BufferResource:
             cpp_pinned_mr = self._pinned_mr._handle
         with nogil:
             self._handle = make_shared[cpp_BufferResource](
-                device_mr.c_ref.value(),
+                make_any_device_resource(device_mr.get_mr()),
                 cpp_pinned_mr,
                 move(_mem_available),
                 period,

@@ -17,8 +17,8 @@ namespace rapidsmpf {
 namespace detail {
 
 RmmResourceAdaptorImpl::RmmResourceAdaptorImpl(
-    rmm::device_async_resource_ref primary_mr,
-    std::optional<rmm::device_async_resource_ref> fallback_mr
+    cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr,
+    std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>> fallback_mr
 )
     : primary_mr_{std::move(primary_mr)}, fallback_mr_{std::move(fallback_mr)} {}
 
@@ -45,12 +45,21 @@ bool RmmResourceAdaptorImpl::operator==(
 
 rmm::device_async_resource_ref
 RmmResourceAdaptorImpl::get_upstream_resource() const noexcept {
-    return primary_mr_;
+    return rmm::device_async_resource_ref{
+        const_cast<cuda::mr::any_resource<cuda::mr::device_accessible>&>(primary_mr_)
+    };
 }
 
 std::optional<rmm::device_async_resource_ref>
 RmmResourceAdaptorImpl::get_fallback_resource() const noexcept {
-    return fallback_mr_;
+    if (fallback_mr_.has_value()) {
+        return rmm::device_async_resource_ref{
+            const_cast<cuda::mr::any_resource<cuda::mr::device_accessible>&>(
+                *fallback_mr_
+            )
+        };
+    }
+    return std::nullopt;
 }
 
 ScopedMemoryRecord RmmResourceAdaptorImpl::get_main_record() const {
@@ -87,7 +96,7 @@ ScopedMemoryRecord RmmResourceAdaptorImpl::end_scoped_memory_record() {
 }
 
 void* RmmResourceAdaptorImpl::allocate(
-    cuda::stream_ref stream, std::size_t nbytes, std::size_t /*alignment*/
+    cuda::stream_ref stream, std::size_t nbytes, std::size_t alignment
 ) {
     constexpr auto PRIMARY = ScopedMemoryRecord::AllocType::PRIMARY;
     constexpr auto FALLBACK = ScopedMemoryRecord::AllocType::FALLBACK;
@@ -95,11 +104,11 @@ void* RmmResourceAdaptorImpl::allocate(
     void* ret{};
     auto alloc_type = PRIMARY;
     try {
-        ret = primary_mr_.allocate(stream, nbytes);
+        ret = primary_mr_.allocate(stream, nbytes, alignment);
     } catch (rmm::out_of_memory const& e) {
         if (fallback_mr_.has_value()) {
             alloc_type = FALLBACK;
-            ret = fallback_mr_->allocate(stream, nbytes);
+            ret = fallback_mr_->allocate(stream, nbytes, alignment);
             std::lock_guard<std::mutex> lock(mutex_);
             fallback_allocations_.insert(ret);
         } else {
@@ -128,7 +137,7 @@ void* RmmResourceAdaptorImpl::allocate(
 }
 
 void RmmResourceAdaptorImpl::deallocate(
-    cuda::stream_ref stream, void* ptr, std::size_t nbytes, std::size_t /*alignment*/
+    cuda::stream_ref stream, void* ptr, std::size_t nbytes, std::size_t alignment
 ) noexcept {
     constexpr auto PRIMARY = ScopedMemoryRecord::AllocType::PRIMARY;
     constexpr auto FALLBACK = ScopedMemoryRecord::AllocType::FALLBACK;
@@ -155,9 +164,9 @@ void RmmResourceAdaptorImpl::deallocate(
         }
     }
     if (alloc_type == PRIMARY) {
-        primary_mr_.deallocate(stream, ptr, nbytes);
+        primary_mr_.deallocate(stream, ptr, nbytes, alignment);
     } else {
-        fallback_mr_->deallocate(stream, ptr, nbytes);
+        fallback_mr_->deallocate(stream, ptr, nbytes, alignment);
     }
 }
 
@@ -180,12 +189,12 @@ void RmmResourceAdaptorImpl::deallocate_sync(
 // ---------------------------------------------------------------------------
 
 RmmResourceAdaptor::RmmResourceAdaptor(
-    rmm::device_async_resource_ref primary_mr,
-    std::optional<rmm::device_async_resource_ref> fallback_mr
+    cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr,
+    std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>> fallback_mr
 )
     : shared_base(
           cuda::mr::make_shared_resource<detail::RmmResourceAdaptorImpl>(
-              primary_mr, fallback_mr
+              std::move(primary_mr), std::move(fallback_mr)
           )
       ) {}
 

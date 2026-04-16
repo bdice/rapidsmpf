@@ -41,8 +41,8 @@ class RmmResourceAdaptorImpl {
      * @param fallback_mr Optional fallback memory resource.
      */
     RmmResourceAdaptorImpl(
-        rmm::device_async_resource_ref primary_mr,
-        std::optional<rmm::device_async_resource_ref> fallback_mr
+        cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr,
+        std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>> fallback_mr
     );
 
     ~RmmResourceAdaptorImpl() = default;
@@ -139,8 +139,8 @@ class RmmResourceAdaptorImpl {
 
   private:
     mutable std::mutex mutex_;
-    rmm::device_async_resource_ref primary_mr_;
-    std::optional<rmm::device_async_resource_ref> fallback_mr_;
+    cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr_;
+    std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>> fallback_mr_;
     std::unordered_set<void*> fallback_allocations_;
 
     ScopedMemoryRecord main_record_;

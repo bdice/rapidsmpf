@@ -4,7 +4,9 @@
 from libc.stdint cimport uint64_t
 from libcpp.memory cimport unique_ptr
 from libcpp.optional cimport optional
-from rmm.librmm.memory_resource cimport device_async_resource_ref
+from rmm.librmm.memory_resource cimport (any_resource, device_accessible,
+                                         device_async_resource_ref,
+                                         make_device_async_resource_ref)
 from rmm.pylibrmm.memory_resource cimport (DeviceMemoryResource,
                                            UpstreamResourceAdaptor)
 
@@ -15,30 +17,22 @@ from rapidsmpf.memory.scoped_memory_record cimport cpp_ScopedMemoryRecord
 cdef extern from "<rapidsmpf/rmm_resource_adaptor.hpp>" nogil:
     cdef cppclass cpp_RmmResourceAdaptor"rapidsmpf::RmmResourceAdaptor":
         cpp_RmmResourceAdaptor(
-            device_async_resource_ref primary_mr,
+            any_resource[device_accessible] primary_mr,
         ) except +ex_handler
 
         cpp_RmmResourceAdaptor(
-            device_async_resource_ref primary_mr,
-            optional[device_async_resource_ref] fallback_mr,
+            any_resource[device_accessible] primary_mr,
+            optional[any_resource[device_accessible]] fallback_mr,
         ) except +ex_handler
 
         cpp_ScopedMemoryRecord get_main_record() except +ex_handler
         uint64_t current_allocated() noexcept
 
 
+# The make_device_async_resource_ref C++ template (declared in RMM's
+# memory_resource.pxd) also covers RmmResourceAdaptor; declare the overload.
 cdef extern from *:
-    """
-    #include <optional>
-    #include <rmm/resource_ref.hpp>
-    #include <rapidsmpf/rmm_resource_adaptor.hpp>
-    std::optional<rmm::device_async_resource_ref>
-    make_rapidsmpf_resource_ref(rapidsmpf::RmmResourceAdaptor& r) {
-        return std::optional<rmm::device_async_resource_ref>(
-            rmm::device_async_resource_ref(r));
-    }
-    """
-    optional[device_async_resource_ref] make_rapidsmpf_resource_ref(
+    optional[device_async_resource_ref] make_device_async_resource_ref(
         cpp_RmmResourceAdaptor&) except +
 
 

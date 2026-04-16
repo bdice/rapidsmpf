@@ -4,7 +4,8 @@
 from cython.operator cimport dereference as deref
 from libc.stdint cimport uint64_t
 from libcpp.optional cimport optional
-from rmm.librmm.memory_resource cimport device_async_resource_ref
+from rmm.librmm.memory_resource cimport (any_resource, device_accessible,
+                                         make_any_device_resource)
 from rmm.pylibrmm.memory_resource cimport (DeviceMemoryResource,
                                            UpstreamResourceAdaptor)
 
@@ -40,19 +41,19 @@ cdef class RmmResourceAdaptor(UpstreamResourceAdaptor):
         if fallback_mr is None:
             self.c_obj.reset(
                 new cpp_RmmResourceAdaptor(
-                    upstream_mr.c_ref.value()
+                    make_any_device_resource(upstream_mr.get_mr())
                 )
             )
         else:
             self.c_obj.reset(
                 new cpp_RmmResourceAdaptor(
-                    upstream_mr.c_ref.value(),
-                    optional[device_async_resource_ref](
-                        fallback_mr.c_ref.value()
+                    make_any_device_resource(upstream_mr.get_mr()),
+                    optional[any_resource[device_accessible]](
+                        make_any_device_resource(fallback_mr.get_mr())
                     ),
                 )
             )
-        self.c_ref = make_rapidsmpf_resource_ref(deref(self.c_obj))
+        self.c_ref = make_device_async_resource_ref(deref(self.c_obj))
 
     def __dealloc__(self):
         with nogil:

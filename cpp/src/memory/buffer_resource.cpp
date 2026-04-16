@@ -34,7 +34,7 @@ auto add_missing_availability_functions(
 }  // namespace
 
 BufferResource::BufferResource(
-    rmm::device_async_resource_ref device_mr,
+    cuda::mr::any_resource<cuda::mr::device_accessible> device_mr,
     std::shared_ptr<PinnedMemoryResource> pinned_mr,
     std::unordered_map<MemoryType, MemoryAvailable> memory_available,
     std::optional<Duration> periodic_spill_check,
@@ -75,7 +75,9 @@ std::shared_ptr<BufferResource> BufferResource::from_options(
 }
 
 rmm::device_async_resource_ref BufferResource::device_mr() const noexcept {
-    return device_mr_;
+    return rmm::device_async_resource_ref{
+        const_cast<cuda::mr::any_resource<cuda::mr::device_accessible>&>(device_mr_)
+    };
 }
 
 rmm::host_async_resource_ref BufferResource::host_mr() noexcept {
