@@ -5,7 +5,6 @@
 #pragma once
 
 #include <string>
-#include <variant>
 
 #include <cudf/utilities/memory_resource.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
@@ -18,67 +17,42 @@
 #include <rapidsmpf/rmm_resource_adaptor.hpp>
 
 /**
- * @brief Owns the RMM resource stack as a type-erased variant.
+ * @brief Create and set a RMM memory resource as the current device resource.
  *
- * Resources are value types with shared ownership; no base class exists.
- * We use a variant to hold whichever concrete resource was selected.
- */
-struct RmmStack {
-    using Variant = std::variant<
-        rmm::mr::cuda_memory_resource,
-        rmm::mr::cuda_async_memory_resource,
-        rmm::mr::managed_memory_resource,
-        rmm::mr::pool_memory_resource>;
-
-    Variant resource;
-};
-
-/**
- * @brief Create and set a RMM stack as the current device memory resource.
- *
- * @param name The name of the stack:
+ * @param name The name of the resource:
  *  - `cuda`: use the default CUDA memory resource.
  *  - `async`: use a CUDA async memory resource.
  *  - `pool`: use a memory pool backed by a CUDA memory resource.
- *  - `managed`: use a memory pool backed by a CUDA managed memory resource.
- * @return An owning RmmStack, which must be kept alive.
+ *  - `managed`: use a CUDA managed memory resource.
  */
-[[nodiscard]] inline std::shared_ptr<RmmStack> set_current_rmm_stack(
-    std::string const& name
-) {
-    auto stack = std::make_shared<RmmStack>();
+inline void set_current_rmm_resource(std::string const& name) {
     if (name == "cuda") {
-        stack->resource.emplace<rmm::mr::cuda_memory_resource>();
+        rmm::mr::set_current_device_resource(rmm::mr::cuda_memory_resource{});
     } else if (name == "async") {
-        stack->resource.emplace<rmm::mr::cuda_async_memory_resource>();
+        rmm::mr::set_current_device_resource(rmm::mr::cuda_async_memory_resource{});
     } else if (name == "managed") {
-        stack->resource.emplace<rmm::mr::managed_memory_resource>();
+        rmm::mr::set_current_device_resource(rmm::mr::managed_memory_resource{});
     } else if (name == "pool") {
-        stack->resource.emplace<rmm::mr::pool_memory_resource>(
-            rmm::mr::cuda_memory_resource{},
-            rmm::percent_of_free_device_memory(80),
-            rmm::percent_of_free_device_memory(80)
+        rmm::mr::set_current_device_resource(
+            rmm::mr::pool_memory_resource{
+                rmm::mr::cuda_memory_resource{},
+                rmm::percent_of_free_device_memory(80),
+                rmm::percent_of_free_device_memory(80)
+            }
         );
     } else {
-        RAPIDSMPF_FAIL("unknown RMM stack name: " + name);
+        RAPIDSMPF_FAIL("unknown RMM resource name: " + name);
     }
-    std::visit(
-        [](auto& mr) { rmm::mr::set_current_device_resource_ref(mr); }, stack->resource
-    );
-    return stack;
 }
 
 /**
- * @brief Create a statistics-enabled device memory resource with on the current RMM
- * stack.
+ * @brief Create a statistics-enabled device memory resource wrapping the current
+ * device resource, and set it as the current device resource.
  *
- * @return An owning memory resource, which must be kept alive.
+ * @return A RmmResourceAdaptor (shared ownership) for accessing statistics.
  */
-[[nodiscard]] inline std::shared_ptr<rapidsmpf::RmmResourceAdaptor>
-set_device_mem_resource_with_stats() {
-    auto ret = std::make_shared<rapidsmpf::RmmResourceAdaptor>(
-        cudf::get_current_device_resource_ref()
-    );
-    rmm::mr::set_current_device_resource_ref(*ret);
-    return ret;
+[[nodiscard]] inline rapidsmpf::RmmResourceAdaptor set_device_mem_resource_with_stats() {
+    rapidsmpf::RmmResourceAdaptor adaptor{cudf::get_current_device_resource_ref()};
+    rmm::mr::set_current_device_resource(adaptor);
+    return adaptor;
 }
