@@ -31,7 +31,7 @@
 
 #include "utils/misc.hpp"
 #include "utils/random_data.hpp"
-#include "utils/rmm_stack.hpp"
+#include "utils/rmm_utils.hpp"
 
 class ArgumentParser {
   public:

@@ -31,7 +31,7 @@
 #include <rapidsmpf/utils/string.hpp>
 
 #include "../utils/misc.hpp"
-#include "../utils/rmm_stack.hpp"
+#include "../utils/rmm_utils.hpp"
 #include "data_generator.hpp"
 
 class ArgumentParser {
