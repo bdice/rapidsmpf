@@ -377,7 +377,8 @@ int main(int argc, char** argv) {
         .input_directory = arguments.input_directory
     };
 
-    auto [ctx, comm] = rapidsmpf::ndsh::create_context(ctx_arguments, &stats_wrapper);
+    auto [ctx, comm] =
+        rapidsmpf::ndsh::create_context(ctx_arguments, std::move(stats_wrapper));
     std::vector<double> timings;
     for (int i = 0; i < arguments.num_iterations; i++) {
         std::vector<rapidsmpf::streaming::Actor> actors;

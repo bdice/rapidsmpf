@@ -359,12 +359,12 @@ int main(int argc, char** argv) {
         memory_available{};
     if (args.device_mem_limit_mb >= 0) {
         memory_available[rapidsmpf::MemoryType::DEVICE] = rapidsmpf::LimitAvailableMemory{
-            &stat_enabled_mr, args.device_mem_limit_mb << 20
+            stat_enabled_mr, args.device_mem_limit_mb << 20
         };
     }
 
     auto stats = args.enable_memory_profiler
-                     ? std::make_shared<rapidsmpf::Statistics>(&stat_enabled_mr)
+                     ? std::make_shared<rapidsmpf::Statistics>(stat_enabled_mr)
                      : std::make_shared<rapidsmpf::Statistics>(/* enable = */ true);
     auto br = std::make_shared<rapidsmpf::BufferResource>(
         stat_enabled_mr,

@@ -102,15 +102,14 @@ class BufferResource {
      * This factory method creates a BufferResource using configuration options to
      * initialize all components.
      *
-     * @param mr Pointer to the RMM resource adaptor, which must outlive the
-     * returned BufferResource.
+     * @param mr The RMM resource adaptor.
      * @param options Configuration options.
      *
      * @return A shared pointer to a BufferResource instance configured according to the
      * options.
      */
     static std::shared_ptr<BufferResource> from_options(
-        RmmResourceAdaptor* mr, config::Options options
+        RmmResourceAdaptor mr, config::Options options
     );
 
     ~BufferResource() noexcept = default;
@@ -426,13 +425,12 @@ class LimitAvailableMemory {
     /**
      * @brief Constructs a `LimitAvailableMemory` instance.
      *
-     * @param mr A pointer to an RMM resource adaptor. The underlying resource
-     * adaptor must outlive this instance.
+     * @param mr The RMM resource adaptor.
      * @param limit The maximum memory available (in bytes). Used to calculate the
      * remaining memory.
      */
-    constexpr LimitAvailableMemory(RmmResourceAdaptor const* mr, std::int64_t limit)
-        : limit{limit}, mr_{mr} {}
+    LimitAvailableMemory(RmmResourceAdaptor mr, std::int64_t limit)
+        : limit{limit}, mr_{std::move(mr)} {}
 
     /**
      * @brief Returns the remaining available memory within the defined limit.
@@ -444,26 +442,26 @@ class LimitAvailableMemory {
      * @return The remaining memory in bytes.
      */
     std::int64_t operator()() const {
-        return limit - mr_->current_allocated();
+        return limit - mr_.current_allocated();
     }
 
   public:
     std::int64_t const limit;  ///< The memory limit.
 
   private:
-    RmmResourceAdaptor const* mr_;
+    RmmResourceAdaptor const mr_;
 };
 
 /**
  * @brief Construct a map of memory-available functions from configuration options.
  *
- * @param mr Pointer to a memory resource adaptor.
+ * @param mr The RMM resource adaptor.
  * @param options Configuration options.
  *
  * @return The map of memory-available functions.
  */
 std::unordered_map<MemoryType, BufferResource::MemoryAvailable>
-memory_available_from_options(RmmResourceAdaptor* mr, config::Options options);
+memory_available_from_options(RmmResourceAdaptor mr, config::Options options);
 
 /**
  * @brief Get the `periodic_spill_check` parameter from configuration options.

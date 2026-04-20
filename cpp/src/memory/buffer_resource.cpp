@@ -54,7 +54,7 @@ BufferResource::BufferResource(
 }
 
 std::shared_ptr<BufferResource> BufferResource::from_options(
-    RmmResourceAdaptor* mr, config::Options options
+    RmmResourceAdaptor mr, config::Options options
 ) {
     auto pinned_mr = PinnedMemoryResource::from_options(options);
     auto mem_available = memory_available_from_options(mr, options);
@@ -65,7 +65,7 @@ std::shared_ptr<BufferResource> BufferResource::from_options(
 
     auto statistics = Statistics::from_options(mr, options, pinned_mr);
     return std::make_shared<BufferResource>(
-        *mr,
+        std::move(mr),
         std::move(pinned_mr),
         std::move(mem_available),
         periodic_spill_check_from_options(options),
@@ -262,13 +262,14 @@ std::shared_ptr<Statistics> BufferResource::statistics() {
 }
 
 std::unordered_map<MemoryType, BufferResource::MemoryAvailable>
-memory_available_from_options(RmmResourceAdaptor* mr, config::Options options) {
+memory_available_from_options(RmmResourceAdaptor mr, config::Options options) {
     // Create a memory availability map that limits device memory based on the
     // `spill_device_limit` option.
     return {
         {MemoryType::DEVICE,
          LimitAvailableMemory{
-             mr, options.get<std::int64_t>("spill_device_limit", [](auto const& s) {
+             std::move(mr),
+             options.get<std::int64_t>("spill_device_limit", [](auto const& s) {
                  auto const [_, total_mem] = rmm::available_device_memory();
                  return rmm::align_down(
                      parse_nbytes_or_percent(s.empty() ? "80%" : s, total_mem),

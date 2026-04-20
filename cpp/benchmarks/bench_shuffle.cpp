@@ -544,14 +544,14 @@ int main(int argc, char** argv) {
         memory_available{};
     if (args.device_mem_limit_mb >= 0) {
         memory_available[rapidsmpf::MemoryType::DEVICE] = rapidsmpf::LimitAvailableMemory{
-            &stat_enabled_mr, args.device_mem_limit_mb << 20
+            stat_enabled_mr, args.device_mem_limit_mb << 20
         };
     }
 
     // Create statistics (enabled from the start) and pass to BufferResource so that
     // all components (Shuffler, SpillManager, etc.) share the same statistics object.
     auto stats = args.enable_memory_profiler
-                     ? std::make_shared<rapidsmpf::Statistics>(&stat_enabled_mr)
+                     ? std::make_shared<rapidsmpf::Statistics>(stat_enabled_mr)
                      : std::make_shared<rapidsmpf::Statistics>(/* enable = */ true);
 
     // We're only going to measure the last run, so disable initially.

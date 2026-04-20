@@ -535,10 +535,10 @@ cdef class LimitAvailableMemory:
     >>> memory_limiter = LimitAvailableMemory(mr, limit=1_000_000)
     """
     def __init__(self, RmmResourceAdaptor mr not None, int64_t limit):
-        self._mr = mr  # Keep the mr alive.
+        self._mr = mr  # Keep a copy of mr alive.
         cdef cpp_RmmResourceAdaptor* handle = mr.get_handle()
         with nogil:
-            self._handle = make_shared[cpp_LimitAvailableMemory](handle, limit)
+            self._handle = make_shared[cpp_LimitAvailableMemory](deref(handle), limit)
 
     def __call__(self):
         """
@@ -567,7 +567,7 @@ cdef extern from "<rapidsmpf/memory/buffer_resource.hpp>" nogil:
     cdef unordered_map[MemoryType, cpp_MemoryAvailable] \
         cpp_memory_available_from_options \
         "rapidsmpf::memory_available_from_options"(
-            cpp_RmmResourceAdaptor* mr, cpp_Options options
+            cpp_RmmResourceAdaptor mr, cpp_Options options
         ) except +ex_handler
 
 
@@ -603,7 +603,8 @@ cdef class AvailableMemoryMap:
         cdef AvailableMemoryMap ret = cls.__new__(cls)
         cdef cpp_RmmResourceAdaptor* mr_handle = mr.get_handle()
         with nogil:
-            ret._handle = cpp_memory_available_from_options(mr_handle, options._handle)
+            ret._handle = cpp_memory_available_from_options(deref(mr_handle),
+                                                            options._handle)
         return ret
 
 
