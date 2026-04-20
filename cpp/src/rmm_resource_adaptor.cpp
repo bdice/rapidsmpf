@@ -8,6 +8,7 @@
 
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/rmm_resource_adaptor.hpp>
+#include <rapidsmpf/utils/misc.hpp>
 
 namespace rapidsmpf {
 
@@ -16,7 +17,11 @@ namespace rapidsmpf {
 // ---------------------------------------------------------------------------
 namespace detail {
 
-RmmResourceAdaptorImpl::RmmResourceAdaptorImpl(
+// NOLINT(clang-analyzer-core.StackAddressEscape): false positive — primary_mr
+// and fallback_mr are moved into a heap-allocated control block inside
+// make_shared_resource; the analyzer incorrectly traces the forwarding
+// reference chain back to the outer caller's stack frame.
+RmmResourceAdaptorImpl::RmmResourceAdaptorImpl(  // NOLINT(clang-analyzer-core.StackAddressEscape)
     cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr,
     std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>> fallback_mr
 )
