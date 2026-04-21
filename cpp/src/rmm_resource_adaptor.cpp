@@ -34,9 +34,6 @@ bool RmmResourceAdaptorImpl::operator==(
     // CCCL 3.2. std::optional::operator== triggers infinite concept checking when the
     // wrapped type (rmm::device_async_resource_ref) inherits from CCCL's concept-based
     // resource_ref.
-    // TODO: Revert this after the RMM resource ref types are replaced with
-    // plain cuda::mr ref types. This depends on
-    // https://github.com/rapidsai/rmm/issues/2011.
     auto this_fallback = get_fallback_resource();
     auto other_fallback = other.get_fallback_resource();
     bool fallbacks_equal =
