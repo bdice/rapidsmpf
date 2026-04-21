@@ -51,7 +51,7 @@ inline void set_current_rmm_resource(std::string const& name) {
  * @return A RmmResourceAdaptor (shared ownership) for accessing statistics.
  */
 [[nodiscard]] inline rapidsmpf::RmmResourceAdaptor set_device_mem_resource_with_stats() {
-    rapidsmpf::RmmResourceAdaptor adaptor{rmm::mr::get_current_device_resource()};
+    rapidsmpf::RmmResourceAdaptor adaptor{rmm::mr::get_current_device_resource_ref()};
     rmm::mr::set_current_device_resource(adaptor);
     return adaptor;
 }

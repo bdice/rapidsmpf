@@ -300,7 +300,7 @@ ProgramOptions parse_arguments(int argc, char** argv);
  * @return Pair of shared pointer to new streaming context and communicator.
  */
 std::pair<std::shared_ptr<streaming::Context>, std::shared_ptr<Communicator>>
-create_context(ProgramOptions& arguments, RmmResourceAdaptor mr);
+create_context(ProgramOptions& arguments, RmmResourceAdaptor&& mr);
 
 /**
  * @brief Finalize MPI when going out of scope.
