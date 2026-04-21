@@ -129,7 +129,7 @@ streaming::Actor consume_channel(
 }
 
 std::pair<std::shared_ptr<streaming::Context>, std::shared_ptr<Communicator>>
-create_context(ProgramOptions& arguments, RmmResourceAdaptor mr) {
+create_context(ProgramOptions& arguments, RmmResourceAdaptor&& mr) {
     rmm::mr::set_current_device_resource(mr);
     std::unordered_map<MemoryType, BufferResource::MemoryAvailable> memory_available{};
     if (arguments.spill_device_limit.has_value()) {

@@ -154,7 +154,7 @@ TEST(RmmResourceAdaptor, RejectsNonOutOfMemoryExceptions) {
     throw_at_limit_resource<rmm::out_of_memory> fallback_mr{8_MiB};
     RmmResourceAdaptor mr(primary_mr, fallback_mr);
 
-    EXPECT_THROW((void)mr.allocate_sync(2_MiB), std::logic_error);
+    EXPECT_THROW(std::ignore = mr.allocate_sync(2_MiB), std::logic_error);
     EXPECT_TRUE(fallback_mr.allocs().empty());
 }
 

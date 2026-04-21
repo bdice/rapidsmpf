@@ -12,9 +12,6 @@
 
 namespace rapidsmpf {
 
-// ---------------------------------------------------------------------------
-// detail::RmmResourceAdaptorImpl
-// ---------------------------------------------------------------------------
 namespace detail {
 
 // NOLINT(clang-analyzer-core.StackAddressEscape): false positive — primary_mr
@@ -188,10 +185,6 @@ void RmmResourceAdaptorImpl::deallocate_sync(
 }
 
 }  // namespace detail
-
-// ---------------------------------------------------------------------------
-// RmmResourceAdaptor (thin shell delegating to shared_resource<Impl>)
-// ---------------------------------------------------------------------------
 
 RmmResourceAdaptor::RmmResourceAdaptor(
     cuda::mr::any_resource<cuda::mr::device_accessible> primary_mr,
