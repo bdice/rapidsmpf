@@ -1,6 +1,6 @@
 # =================================================================================
 # cmake-format: off
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # cmake-format: on
 # =================================================================================
@@ -8,14 +8,13 @@
 add_executable(example_shuffle "example_shuffle.cpp" "../benchmarks/utils/random_data.cu")
 set_target_properties(
   example_shuffle
-  PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<BUILD_INTERFACE:${RAPIDSMPF_BINARY_DIR}/examples>"
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${RAPIDSMPF_BINARY_DIR}/examples"
              CXX_STANDARD 20
              CXX_STANDARD_REQUIRED ON
              # For std:: support of __int128_t. Can be removed once using cuda::std
              CXX_EXTENSIONS ON
              CUDA_STANDARD 20
              CUDA_STANDARD_REQUIRED ON
-             LINK_FLAGS "-Wl,--allow-shlib-undefined"
 )
 target_compile_options(
   example_shuffle PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${RAPIDSMPF_CXX_FLAGS}>"
@@ -36,12 +35,11 @@ if(RAPIDSMPF_HAVE_CUPTI)
   add_executable(example_cupti_monitor "example_cupti_monitor.cpp")
   set_target_properties(
     example_cupti_monitor
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<BUILD_INTERFACE:${RAPIDSMPF_BINARY_DIR}/examples>"
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${RAPIDSMPF_BINARY_DIR}/examples"
                CXX_STANDARD 20
                CXX_STANDARD_REQUIRED ON
                CUDA_STANDARD 20
                CUDA_STANDARD_REQUIRED ON
-               LINK_FLAGS "-Wl,--allow-shlib-undefined"
   )
   target_compile_options(
     example_cupti_monitor PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${RAPIDSMPF_CXX_FLAGS}>"

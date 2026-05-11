@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -8,6 +8,7 @@
 #include <string>
 
 #include <cudf/column/column_view.hpp>
+#include <cudf/contiguous_split.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 
@@ -64,7 +65,9 @@ std::string str(
  * @param stream CUDA stream used for device memory operations and kernel launches.
  * @return The estimated memory usage of the column.
  */
-size_t estimated_memory_usage(cudf::column_view const& col, rmm::cuda_stream_view stream);
+std::size_t estimated_memory_usage(
+    cudf::column_view const& col, rmm::cuda_stream_view stream
+);
 
 /**
  * @brief Estimate the memory usage of a table.
@@ -73,7 +76,8 @@ size_t estimated_memory_usage(cudf::column_view const& col, rmm::cuda_stream_vie
  * @param stream CUDA stream used for device memory operations and kernel launches.
  * @return The estimated memory usage of the table.
  */
-size_t estimated_memory_usage(cudf::table_view const& tbl, rmm::cuda_stream_view stream);
-
+std::size_t estimated_memory_usage(
+    cudf::table_view const& tbl, rmm::cuda_stream_view stream
+);
 
 }  // namespace rapidsmpf

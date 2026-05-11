@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -19,58 +19,60 @@
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/memory/host_buffer.hpp>
 #include <rapidsmpf/memory/memory_type.hpp>
-#include <rapidsmpf/utils.hpp>
+#include <rapidsmpf/statistics.hpp>
+#include <rapidsmpf/utils/misc.hpp>
 
 namespace rapidsmpf {
 
 /**
  * @brief Buffer representing device or host memory.
  *
- * @note The constructors are private, use `BufferResource` to construct buffers.
- * @note The memory type (e.g., host or device) is constant and cannot change during
- * the buffer's lifetime.
- * @note This buffer is stream-ordered and has an associated CUDA stream (see `stream()`).
- * All work (host and device) that reads or writes the buffer must either be enqueued on
- * that stream or be synchronized with it *before* accessing the memory.
- * @note When passing the buffer to a non-stream-aware API (e.g., MPI, host-only code),
- * you must ensure the last write has completed *before* the hand-off. Either synchronize
- * the buffer's stream (e.g., `stream().synchronize()`) or verify completion via
- * `is_latest_write_done()`.
+ * A `Buffer` holds either device memory or host memory, determined by its memory type
+ * at construction. See `device_buffer_types` and `host_buffer_types` for the sets of
+ * memory types that result in device-backed and host-backed storage.
+ *
+ * Buffers are stream ordered and have an associated CUDA stream (see `stream()`). All
+ * work that reads or writes the buffer must either be enqueued on that stream or be
+ * synchronized with it before accessing the memory. For example, when passing the buffer
+ * to a non-stream aware API (e.g., MPI or host-only code), the caller must ensure that
+ * the most recent write has completed before the hand off. This can be done by
+ * synchronizing the buffer's stream or by checking `is_latest_write_done()`.
+ *
+ * To obtain an `rmm::device_buffer` from a `Buffer`, first ensure that the buffer's
+ * memory type is one of the types listed in `device_buffer_types` (moving the buffer if
+ * necessary), then call `release_device_buffer()`.
+ *
+ * @note The constructors are private. Buffers are created through `BufferResource`.
  */
 class Buffer {
     friend class BufferResource;
 
   public:
-    /// @brief Storage type for the device buffer.
-    using DeviceStorageT = std::unique_ptr<rmm::device_buffer>;
+    /// @brief Storage type for a device buffer.
+    using DeviceBufferT = std::unique_ptr<rmm::device_buffer>;
 
-    /// @brief Storage type for the host buffer.
-    using HostStorageT = std::unique_ptr<HostBuffer>;
-
-    /**
-     * @brief Storage type in Buffer, which could be either host or device memory.
-     */
-    using StorageT = std::variant<DeviceStorageT, HostStorageT>;
+    /// @brief Storage type for a host buffer.
+    using HostBufferT = std::unique_ptr<HostBuffer>;
 
     /**
-     * @brief Access the underlying host memory buffer (const).
+     * @brief Memory types suitable for constructing a device backed buffer.
      *
-     * @return A reference to the unique pointer managing the host memory.
-     *
-     * @throws std::logic_error if the buffer does not manage host memory.
-     * @throws std::logic_error If the buffer is locked.
+     * A buffer may use `DeviceBufferT` only if its memory type is listed here.
+     * This ensures that the buffer is backed by memory that behaves as device
+     * accessible memory.
      */
-    [[nodiscard]] HostStorageT const& host() const;
+    static constexpr std::array<MemoryType, 1> device_buffer_types{MemoryType::DEVICE};
 
     /**
-     * @brief Access the underlying device memory buffer (const).
+     * @brief Memory types suitable for constructing a host backed buffer.
      *
-     * @return A const reference to the unique pointer managing the device memory.
-     *
-     * @throws std::logic_error if the buffer does not manage device memory.
-     * @throws std::logic_error If the buffer is locked.
+     * A buffer may use `HostBufferT` only if its memory type is listed here.
+     * This ensures that the buffer is backed by memory that behaves as host
+     * accessible memory.
      */
-    [[nodiscard]] DeviceStorageT const& device() const;
+    static constexpr std::array<MemoryType, 2> host_buffer_types{
+        MemoryType::HOST, MemoryType::PINNED_HOST
+    };
 
     /**
      * @brief Access the underlying memory buffer (host or device memory).
@@ -95,8 +97,8 @@ class Buffer {
      * Enqueuing work on any other stream without synchronizing with the buffer's
      * stream before and after the call is undefined behavior. In other words,
      * @p f must behave as a single stream-ordered operation, similar to issuing one
-     * `cudaMemcpyAsync` on the buffer's stream. For non-stream-aware integrations,
-     * use `exclusive_data_access()`.
+     * `rapidsmpf::cuda_memcpy_async` on the buffer's stream. For non-stream-aware
+     * integrations, use `exclusive_data_access()`.
      *
      * After @p f returns, an event is recorded on the buffer's stream, establishing
      * the new "latest write" for this buffer.
@@ -114,11 +116,10 @@ class Buffer {
      * // Snippet: copy data from `src_ptr` into `buffer` on the buffer's stream.
      * buffer.write_access([&](std::byte* buffer_ptr, rmm::cuda_stream_view stream) {
      *   assert(buffer.stream().value() == stream.value());
-     *   RAPIDSMPF_CUDA_TRY_ALLOC(cudaMemcpyAsync(
+     *   RAPIDSMPF_CUDA_TRY(rapidsmpf::cuda_memcpy_async(
      *       buffer_ptr,
      *       src_ptr,
      *       num_bytes,
-     *       cudaMemcpyDefault,
      *       stream
      *   ));
      * });
@@ -159,6 +160,10 @@ class Buffer {
      * raw pointer and cannot be expressed as work on a CUDA stream (e.g., MPI, blocking
      * host I/O).
      *
+     * @warning The `Buffer` does not track read access to its underlying storage, and so
+     * one should be aware of write-after-read anti-dependencies when obtaining exclusive
+     * access.
+     *
      * @note Prefer `write_access(...)` if you can express the operation as a
      * single callable on a stream, even if that requires manually synchronizing the
      * stream before the callable returns.
@@ -185,13 +190,7 @@ class Buffer {
      * @throws std::logic_error if the buffer is not initialized.
      */
     [[nodiscard]] MemoryType constexpr mem_type() const {
-        return std::visit(
-            overloaded{
-                [](HostStorageT const&) -> MemoryType { return MemoryType::HOST; },
-                [](DeviceStorageT const&) -> MemoryType { return MemoryType::DEVICE; }
-            },
-            storage_
-        );
+        return mem_type_;
     }
 
     /**
@@ -207,6 +206,41 @@ class Buffer {
     }
 
     /**
+     * @brief Get the CUDA event that tracks the latest write into the buffer.
+     *
+     * @return The CUDA event that tracks the latest write into the buffer.
+     */
+    [[nodiscard]] CudaEvent const& latest_write_event() const noexcept {
+        return latest_write_event_;
+    }
+
+    /**
+     * @brief Rebind the buffer to a new CUDA stream.
+     *
+     * Changes the buffer's associated stream to @p new_stream and ensures proper
+     * synchronization: @p new_stream will wait for any pending work on the current
+     * stream before proceeding. The underlying storage stream (e.g., the stream of
+     * an `rmm::device_buffer` or `HostBuffer`) is also updated.
+     *
+     * @param new_stream The new CUDA stream.
+     *
+     * @throws std::logic_error If the buffer is locked.
+     *
+     * @code{.cpp}
+     * // Example: merge buffers from different streams onto a single stream.
+     * Buffer buffer_a = ...;  // associated with stream_a
+     * Buffer buffer_b = ...;  // associated with stream_b
+     *
+     * buffer_a.rebind_stream(merged_stream);
+     * buffer_b.rebind_stream(merged_stream);
+     *
+     * // Both buffers now use merged_stream with proper synchronization
+     * buffer_copy(buffer_a, buffer_b, size);
+     * @endcode
+     */
+    void rebind_stream(rmm::cuda_stream_view new_stream);
+
+    /**
      * @brief Check whether the buffer's most recent write has completed.
      *
      * Returns whether the CUDA event that tracks the most recent write into this
@@ -219,6 +253,11 @@ class Buffer {
      * races: another thread may enqueue additional writes after this returns `true`.
      * Ensure no further writes are enqueued, or establish stronger synchronization (e.g.,
      * synchronize the buffer's stream) before using the buffer.
+     *
+     * @warning This check only confirms that there are no pending _writes_ to the
+     * `Buffer`. Pending stream-ordered _reads_ from the `Buffer` are not tracked and
+     * therefore one should be aware of write-after-read anti-dependencies when using this
+     * check to pass from stream-ordered to non-stream-ordered code.
      *
      * @return `true` if the last recorded write event has completed; `false` otherwise.
      *
@@ -245,7 +284,7 @@ class Buffer {
 
   private:
     /**
-     * @brief Construct a stream-ordered Buffer from synchronized host memory.
+     * @brief Construct a stream-ordered Buffer from synchronized host buffer.
      *
      * Adopts @p host_buffer as the Buffer's storage and associates the Buffer with
      * @p stream for subsequent stream-ordered operations.
@@ -257,14 +296,23 @@ class Buffer {
      *
      * @param host_buffer Unique pointer to a vector containing host memory.
      * @param stream CUDA stream to associate with the Buffer for future operations.
+     * @param mem_type The memory type of the underlying @p host_buffer.
      *
      * @throws std::invalid_argument If @p host_buffer is null.
-     * @throws std::logic_error If the buffer is locked.
+     * @throws std::logic_error If the buffer is locked, or @p mem_type is not suitable
+     * for @p host_buffer (see warning for details).
+     *
+     * @warning The caller is responsible to ensure @p mem_type is suitable for @p
+     * host_buffer. An unsuitable memory type leads to an irrecoverable condition.
      */
-    Buffer(std::unique_ptr<HostBuffer> host_buffer, rmm::cuda_stream_view stream);
+    Buffer(
+        std::unique_ptr<HostBuffer> host_buffer,
+        rmm::cuda_stream_view stream,
+        MemoryType mem_type
+    );
 
     /**
-     * @brief Construct a stream-ordered Buffer from device memory.
+     * @brief Construct a stream-ordered Buffer from a device buffer.
      *
      * Adopts @p device_buffer as the Buffer's storage and inherits its CUDA stream.
      * At construction, the Buffer records an initial "latest write" on that stream,
@@ -276,11 +324,16 @@ class Buffer {
      * stream (or established ordering with it) for correctness.
      *
      * @param device_buffer Unique pointer to a device buffer. Must be non-null.
+     * @param mem_type The memory type of the underlying @p device_buffer.
      *
      * @throws std::invalid_argument If @p device_buffer is null.
-     * @throws std::logic_error If the buffer is locked.
+     * @throws std::logic_error If the buffer is locked, or @p mem_type is not suitable
+     * for @p device_buffer (see warning for details).
+     *
+     * @warning The caller is responsible to ensure @p mem_type is suitable for @p
+     * device_buffer. An unsuitable memory type leads to an irrecoverable condition.
      */
-    Buffer(std::unique_ptr<rmm::device_buffer> device_buffer);
+    Buffer(std::unique_ptr<rmm::device_buffer> device_buffer, MemoryType mem_type);
 
     /**
      * @brief Throws if the buffer is currently locked by `exclusive_data_access()`.
@@ -290,71 +343,54 @@ class Buffer {
     void throw_if_locked() const;
 
     /**
-     * @brief Access the underlying host memory buffer.
+     * @brief Release the underlying device buffer.
      *
-     * @return A reference to the unique pointer managing the host memory.
+     * @return The underlying device buffer.
      *
-     * @throws std::logic_error if the buffer does not manage host memory.
+     * @throws std::logic_error if the buffer does not manage a device buffer.
      * @throws std::logic_error If the buffer is locked.
      */
-    [[nodiscard]] HostStorageT& host();
+    [[nodiscard]] DeviceBufferT release_device_buffer();
 
     /**
-     * @brief Access the underlying device memory buffer.
+     * @brief Release the underlying host buffer.
      *
-     * @return A reference to the unique pointer managing the device memory.
+     * @return The underlying host buffer.
      *
-     * @throws std::logic_error if the buffer does not manage device memory.
+     * @throws std::logic_error if the buffer does not manage a host buffer.
      * @throws std::logic_error If the buffer is locked.
      */
-    [[nodiscard]] DeviceStorageT& device();
-
-    /**
-     * @brief Release the underlying device memory buffer.
-     *
-     * @return The underlying device memory buffer.
-     *
-     * @throws std::logic_error if the buffer does not manage device memory.
-     * @throws std::logic_error If the buffer is locked.
-     */
-    [[nodiscard]] DeviceStorageT release_device();
-
-    /**
-     * @brief Release the underlying host memory buffer.
-     *
-     * @return The underlying host memory buffer.
-     *
-     * @throws std::logic_error if the buffer does not manage host memory.
-     * @throws std::logic_error If the buffer is locked.
-     */
-    [[nodiscard]] HostStorageT release_host();
+    [[nodiscard]] HostBufferT release_host_buffer();
 
   public:
     std::size_t const size;  ///< The size of the buffer in bytes.
 
   private:
-    /// @brief The underlying storage host memory or device memory buffer (where
-    /// applicable).
-    StorageT storage_;
+    MemoryType const mem_type_;
+    std::variant<DeviceBufferT, HostBufferT> storage_;
     rmm::cuda_stream_view stream_;
     CudaEvent latest_write_event_;
-    std::atomic_bool lock_;
+    std::atomic<bool> lock_;
 };
 
 /**
  * @brief Asynchronously copy data between buffers.
  *
- * Copies @p size bytes from @p src at @p src_offset into @p dst at @p dst_offset.
+ * Copies @p size bytes from @p src, starting at @p src_offset, into @p dst at
+ * @p dst_offset.
  *
+ * @param statistics Statistics object used to record the copy operation. Use
+ * `Statistics::disabled()` to skip recording.
  * @param dst Destination buffer.
  * @param src Source buffer.
  * @param size Number of bytes to copy.
- * @param dst_offset Offset (in bytes) into the destination buffer.
- * @param src_offset Offset (in bytes) into the source buffer.
+ * @param dst_offset Byte offset into the destination buffer.
+ * @param src_offset Byte offset into the source buffer.
  *
- * @throws std::invalid_argument If out of bounds.
+ * @throws std::invalid_argument If the requested range is out of bounds.
  */
 void buffer_copy(
+    std::shared_ptr<Statistics> statistics,
     Buffer& dst,
     Buffer const& src,
     std::size_t size,

@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,6 +12,7 @@
 #include <memory>
 
 #include <rapidsmpf/bootstrap/bootstrap.hpp>
+#include <rapidsmpf/progress_thread.hpp>
 
 namespace rapidsmpf {
 
@@ -20,28 +21,6 @@ class UCXX;
 }
 
 namespace bootstrap {
-
-/**
- * @brief Check if the current process was launched via `rrun`.
- *
- * This helper detects bootstrap mode by checking for the presence of the
- * `RAPIDSMPF_RANK` environment variable, which is set by `rrun`.
- *
- * @return true if running under `rrun` bootstrap mode, false otherwise.
- */
-bool is_running_with_rrun();
-
-/**
- * @brief Get the number of `rrun` ranks.
- *
- * This helper retrieves the number of ranks when running with `rrun`.
- * The number of ranks is fetched from the `RAPIDSMPF_NRANKS` environment variable.
- *
- * @return Number of ranks.
- * @throws std::runtime_error if not running with `rrun` or if `RAPIDSMPF_NRANKS` is not
- * set or cannot be parsed.
- */
-Rank get_nranks();
 
 /**
  * @brief Create a UCXX communicator using the bootstrap backend.
@@ -55,18 +34,22 @@ Rank get_nranks();
  * The function handles all coordination transparently based on the detected
  * or specified backend.
  *
+ * @param progress_thread Progress thread for the initialized communicator
  * @param backend Backend to use (default: AUTO for auto-detection).
  * @param options Configuration options for the UCXX communicator.
  * @return Shared pointer to initialized UCXX communicator.
  * @throws std::runtime_error if initialization fails.
  *
  * @code
- * auto comm = rapidsmpf::bootstrap::create_ucxx_comm();
+ * auto progress = std::make_shared<rapidsmpf::ProgressThread>();
+ * auto comm = rapidsmpf::bootstrap::create_ucxx_comm(progress);
  * comm->logger().print("Hello from rank " + std::to_string(comm->rank()));
  * @endcode
  */
 std::shared_ptr<ucxx::UCXX> create_ucxx_comm(
-    Backend backend = Backend::AUTO, config::Options options = config::Options{}
+    std::shared_ptr<ProgressThread> progress_thread,
+    BackendType type = BackendType::AUTO,
+    config::Options options = config::Options{}
 );
 
 }  // namespace bootstrap

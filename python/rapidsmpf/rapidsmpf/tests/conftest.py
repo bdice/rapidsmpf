@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from rmm.pylibrmm.stream import DEFAULT_STREAM
 
 from rapidsmpf.communicator import COMMUNICATORS
 from rapidsmpf.config import Options, get_environment_variables
+from rapidsmpf.progress_thread import ProgressThread
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -30,6 +31,19 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Disable MPI tests",
     )
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """
+    Tear down a lingering single-worker context so the C++ periodic spill thread
+    cannot call into Python after pytest has begun interpreter shutdown.
+    """
+    try:
+        from rapidsmpf.integrations.single import destroy_worker
+
+        destroy_worker()
+    except Exception:
+        pass
 
 
 @pytest.fixture(scope="session")
@@ -85,7 +99,9 @@ def _mpi_comm(*, _mpi_disabled: bool) -> Communicator:
 
     from rapidsmpf.communicator.mpi import new_communicator
 
-    return new_communicator(MPI.COMM_WORLD, Options(get_environment_variables()))
+    return new_communicator(
+        MPI.COMM_WORLD, Options(get_environment_variables()), ProgressThread()
+    )
 
 
 @pytest.fixture(scope="session")
@@ -100,7 +116,7 @@ def _ucxx_comm() -> Communicator:
     """
     from rapidsmpf.communicator.testing import ucxx_mpi_setup
 
-    return ucxx_mpi_setup(None, Options(get_environment_variables()))
+    return ucxx_mpi_setup(None, Options(get_environment_variables()), ProgressThread())
 
 
 @pytest.fixture(

@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -11,6 +11,7 @@
 #include <optional>
 #include <unordered_map>
 
+#include <rapidsmpf/memory/buffer_resource.hpp>
 #include <rapidsmpf/memory/content_description.hpp>
 #include <rapidsmpf/streaming/core/message.hpp>
 
@@ -121,6 +122,25 @@ class SpillableMessages {
      * @return Copy of a map from `MessageId` to `ContentDescription`.
      */
     std::map<MessageId, ContentDescription> get_content_descriptions() const;
+
+    /**
+     * @brief Get the content description of a message by ID.
+     *
+     * @param mid Message identifier.
+     * @return Content description of the message.
+     *
+     * @throws std::out_of_range If the message does not exist.
+     */
+    ContentDescription get_content_description(MessageId mid) const;
+
+    /**
+     * @brief Clear all outstanding messages
+     *
+     * This is useful for avoiding Items from outliving the BufferResource on
+     * which they were allocated. It is the caller's responsibility to clear
+     * the messages before the BufferResource is destroyed.
+     */
+    void clear();
 
   private:
     /**

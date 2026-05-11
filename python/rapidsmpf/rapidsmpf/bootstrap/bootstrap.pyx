@@ -1,15 +1,17 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
 from libcpp.memory cimport dynamic_pointer_cast, shared_ptr
 
+from rapidsmpf._detail.exception_handling cimport ex_handler
 from rapidsmpf.communicator.communicator cimport Communicator, cpp_Communicator
 from rapidsmpf.config cimport Options, cpp_Options
+from rapidsmpf.progress_thread cimport ProgressThread, cpp_ProgressThread
 
 
-cdef extern from "<rapidsmpf/bootstrap/bootstrap.hpp>" namespace \
+cdef extern from "<rapidsmpf/bootstrap/backend.hpp>" namespace \
   "rapidsmpf::bootstrap" nogil:
-    cpdef enum class Backend(int):
+    cpdef enum class BackendType(int):
         AUTO
         FILE
 
@@ -20,34 +22,49 @@ cdef extern from "<rapidsmpf/communicator/ucxx.hpp>" namespace \
         pass
 
 
-cdef extern from "<rapidsmpf/bootstrap/ucxx.hpp>" nogil:
+cdef extern from "<rapidsmpf/bootstrap/utils.hpp>" nogil:
     bint cpp_is_running_with_rrun \
-        "rapidsmpf::bootstrap::is_running_with_rrun"() except +
+        "rapidsmpf::bootstrap::is_running_with_rrun"() except +ex_handler
+
+    bint cpp_is_running_with_slurm \
+        "rapidsmpf::bootstrap::is_running_with_slurm"() except +ex_handler
+
+    int cpp_get_rank \
+        "rapidsmpf::bootstrap::get_rank"() except +ex_handler
 
     int cpp_get_nranks \
-        "rapidsmpf::bootstrap::get_nranks"() except +
+        "rapidsmpf::bootstrap::get_nranks"() except +ex_handler
 
+cdef extern from "<rapidsmpf/bootstrap/ucxx.hpp>" nogil:
     shared_ptr[cpp_UCXX_Communicator] cpp_create_ucxx_comm \
         "rapidsmpf::bootstrap::create_ucxx_comm"(
-            Backend backend,
+            shared_ptr[cpp_ProgressThread],
+            BackendType type,
             cpp_Options options,
-        ) except +
+        ) except +ex_handler
 
 
-def create_ucxx_comm(Backend backend = Backend.AUTO, options = None):
+def create_ucxx_comm(
+    ProgressThread progress_thread not None,
+    BackendType type = BackendType.AUTO,
+    options = None,
+):
     """
     Create a UCXX communicator using the bootstrap backend.
 
     This function bootstraps a UCXX-based communicator using the selected
     coordination backend (currently file-based), relying on environment
-    variables such as ``RAPIDSMPF_RANK``, ``RAPIDSMPF_NRANKS``, and
-    ``RAPIDSMPF_COORD_DIR``.
+    variables such as ``RRUN_RANK``, ``RRUN_NRANKS``, and
+    ``RRUN_COORD_DIR``.
 
     Parameters
     ----------
-    backend
-        Backend to use for coordination. By default, ``Backend.AUTO`` is used,
-        which currently resolves to the file-based backend.
+    progress_thread
+        Progress thread to use in the initialized communicator.
+    type
+        Backend type to use for coordination. By default,
+        :attr:`BackendType.AUTO` is used, which currently resolves to the
+        file-based backend.
     options
         Configuration options for the UCXX communicator. If ``None``, a default
         `rapidsmpf.config.Options` instance is used.
@@ -71,7 +88,9 @@ def create_ucxx_comm(Backend backend = Backend.AUTO, options = None):
         cpp_options = <Options>options
 
     with nogil:
-        ucxx_comm = cpp_create_ucxx_comm(backend, cpp_options._handle)
+        ucxx_comm = cpp_create_ucxx_comm(
+            progress_thread._handle, type, cpp_options._handle
+        )
         base_comm = dynamic_pointer_cast[cpp_Communicator, cpp_UCXX_Communicator](
             ucxx_comm
         )
@@ -85,7 +104,7 @@ def is_running_with_rrun():
     Check whether the current process was launched via ``rrun``.
 
     This helper inspects the bootstrap environment (e.g. the presence of
-    ``RAPIDSMPF_RANK``) to determine if the process is running under
+    ``RRUN_RANK``) to determine if the process is running under
     ``rrun``-managed bootstrap mode.
 
     Returns
@@ -98,12 +117,55 @@ def is_running_with_rrun():
     return bool(ret)
 
 
+def is_running_with_slurm():
+    """
+    Check whether the current process is running under Slurm with PMIx.
+
+    This helper detects Slurm environment by checking for PMIx namespace
+    or Slurm job step environment variables.
+
+    Returns
+    -------
+    ``True`` if running under Slurm with PMIx, ``False`` otherwise.
+    """
+    cdef bint ret
+    with nogil:
+        ret = cpp_is_running_with_slurm()
+    return bool(ret)
+
+
+def get_rank():
+    """
+    Get the current bootstrap rank.
+
+    This helper retrieves the rank of the current process when running with a
+    bootstrap launcher (rrun or Slurm). Checks environment variables in order:
+    1. RRUN_RANK (set by rrun)
+    2. PMIX_RANK (set by PMIx)
+    3. SLURM_PROCID (set by Slurm)
+
+    Returns
+    -------
+    Rank of the current process.
+
+    Raises
+    ------
+    RuntimeError
+        If not running with a bootstrap launcher or if the environment
+        variable cannot be parsed.
+    """
+    cdef int ret
+    with nogil:
+        ret = cpp_get_rank()
+    return ret
+
+
 def get_nranks():
     """
     Get the number of ``rrun`` ranks.
 
     This helper retrieves the number of ranks when running with ``rrun``.
-    The number of ranks is fetched from the ``RAPIDSMPF_NRANKS`` environment variable.
+    The number of ranks is fetched from the ``RRUN_NRANKS`` environment variable.
 
     Returns
     -------
@@ -113,7 +175,7 @@ def get_nranks():
     Raises
     ------
     RuntimeError
-        If not running with ``rrun`` or if ``RAPIDSMPF_NRANKS`` is not set
+        If not running with ``rrun`` or if ``RRUN_NRANKS`` is not set
         or cannot be parsed.
     """
     cdef int ret

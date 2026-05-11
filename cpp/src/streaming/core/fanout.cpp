@@ -1,43 +1,25 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <algorithm>
 #include <deque>
+#include <ranges>
 #include <span>
 
+#include <coro/coro.hpp>
+
 #include <rapidsmpf/memory/memory_type.hpp>
+#include <rapidsmpf/streaming/core/actor.hpp>
 #include <rapidsmpf/streaming/core/channel.hpp>
 #include <rapidsmpf/streaming/core/coro_utils.hpp>
 #include <rapidsmpf/streaming/core/fanout.hpp>
 #include <rapidsmpf/streaming/core/message.hpp>
-#include <rapidsmpf/streaming/core/node.hpp>
+#include <rapidsmpf/streaming/core/spillable_messages.hpp>
 
-#include <coro/coro.hpp>
-
-namespace rapidsmpf::streaming::node {
+namespace rapidsmpf::streaming::actor {
 namespace {
-
-/**
- * @brief Returns the memory types to consider when allocating an output message.
- *
- * The returned view begins at the principal memory type of the input message
- * and continues through the remaining types in `MEMORY_TYPES` in order of
- * preference. This ensures we never allocate in a higher memory tier than the
- * message's principal type. For example, if a message has been spilled and its
- * principal type is `HOST`, only `HOST` will be considered.
- *
- * @param msg The message whose content determines the memory type order.
- *
- * @return A view of memory types to try for allocation, starting at the
- * principal memory type.
- */
-constexpr std::span<MemoryType const> get_output_memory_types(Message const& msg) {
-    auto const principal = msg.content_description().principal_memory_type();
-    return MEMORY_TYPES
-           | std::views::drop_while([principal](MemoryType m) { return m != principal; });
-}
 
 /**
  * @brief Asynchronously send a message to multiple output channels.
@@ -46,25 +28,27 @@ constexpr std::span<MemoryType const> get_output_memory_types(Message const& msg
  * message.
  * @param chs_out The set of output channels to which the message is sent.
  */
-Node send_to_channels(
+Actor send_to_channels(
     Context& ctx, Message&& msg, std::vector<std::shared_ptr<Channel>>& chs_out
 ) {
     RAPIDSMPF_EXPECTS(!chs_out.empty(), "output channels cannot be empty");
 
     auto async_copy_and_send = [](Context& ctx_,
                                   Message const& msg_,
-                                  size_t msg_sz_,
+                                  std::size_t msg_sz_,
                                   Channel& ch_) -> coro::task<bool> {
         co_await ctx_.executor()->schedule();
-        auto res = ctx_.br()->reserve_or_fail(msg_sz_, get_output_memory_types(msg_));
+        auto const& cd = msg_.content_description();
+        auto const mem_types = leq_memory_types(cd.principal_memory_type());
+        auto res = ctx_.br()->reserve_or_fail(msg_sz_, mem_types);
         co_return co_await ch_.send(msg_.copy(res));
     };
 
     // async copy & send tasks for all channels except the last one
     std::vector<coro::task<bool>> async_send_tasks;
     async_send_tasks.reserve(chs_out.size() - 1);
-    size_t msg_sz = msg.copy_cost();
-    for (size_t i = 0; i < chs_out.size() - 1; i++) {
+    std::size_t msg_sz = msg.copy_cost();
+    for (std::size_t i = 0; i < chs_out.size() - 1; i++) {
         async_send_tasks.emplace_back(async_copy_and_send(ctx, msg, msg_sz, *chs_out[i]));
     }
 
@@ -85,9 +69,9 @@ Node send_to_channels(
  * @param ctx The context to use.
  * @param ch_in The input channel to receive messages from.
  * @param chs_out The output channels to send messages to.
- * @return A node representing the bounded fanout operation.
+ * @return An actor representing the bounded fanout operation.
  */
-Node bounded_fanout(
+Actor bounded_fanout(
     std::shared_ptr<Context> ctx,
     std::shared_ptr<Channel> ch_in,
     std::vector<std::shared_ptr<Channel>> chs_out
@@ -110,7 +94,7 @@ Node bounded_fanout(
         co_await send_to_channels(*ctx, std::move(msg), chs_out);
     }
 
-    std::vector<Node> drain_tasks;
+    std::vector<Actor> drain_tasks;
     drain_tasks.reserve(chs_out.size());
     for (auto& ch : chs_out) {
         drain_tasks.emplace_back(ch->drain(ctx->executor()));
@@ -160,14 +144,15 @@ struct UnboundedFanout {
      *
      * @param num_channels The number of output channels.
      */
-    explicit UnboundedFanout(size_t num_channels) : per_ch_processed(num_channels, 0) {}
+    explicit UnboundedFanout(std::size_t num_channels)
+        : per_ch_processed(num_channels, 0) {}
 
     /**
      * @brief Sentinel value indicating that the index is invalid. This is set when a
      * failure occurs during send tasks. process input task will filter out messages with
      * this index.
      */
-    static constexpr size_t InvalidIdx = std::numeric_limits<size_t>::max();
+    static constexpr std::size_t InvalidIdx = std::numeric_limits<std::size_t>::max();
 
     /**
      * @brief RAII helper class to set a channel index to invalid and notify the process
@@ -175,13 +160,13 @@ struct UnboundedFanout {
      */
     struct SetChannelIdxInvalidAtExit {
         UnboundedFanout* fanout;
-        size_t& self_next_idx;
+        std::size_t& self_next_idx;
 
         ~SetChannelIdxInvalidAtExit() {
             coro::sync_wait(set_channel_idx_invalid());
         }
 
-        Node set_channel_idx_invalid() {
+        Actor set_channel_idx_invalid() {
             if (self_next_idx != InvalidIdx) {
                 {
                     auto lock = co_await fanout->mtx.scoped_lock();
@@ -196,46 +181,54 @@ struct UnboundedFanout {
      * @brief Send messages to multiple output channels.
      *
      * @param ctx The context to use.
-     * @param self_next_idx Next index to send for the current channel
+     * @param self_next_idx Next index to send for the current channel (passed by ref
+     * because it needs to be updated)
      * @param ch_out The output channel to send messages to.
      * @return A coroutine representing the task.
      */
-    Node send_task(Context& ctx, size_t& self_next_idx, std::shared_ptr<Channel> ch_out) {
+    Actor send_task(
+        Context& ctx, std::size_t& self_next_idx, std::shared_ptr<Channel> ch_out
+    ) {
         ShutdownAtExit ch_shutdown{ch_out};
         SetChannelIdxInvalidAtExit set_ch_idx_invalid{
             .fanout = this, .self_next_idx = self_next_idx
         };
         co_await ctx.executor()->schedule();
 
-        size_t n_available_messages = 0;
-        std::vector<std::reference_wrapper<Message>> messages_to_send;
+        auto spillable_messages = ctx.spillable_messages();
+
+        std::size_t n_available_messages = 0;
+        std::vector<SpillableMessages::MessageId> msg_ids_to_send;
         while (true) {
             {
                 auto lock = co_await mtx.scoped_lock();
                 co_await data_ready.wait(lock, [&] {
                     // irrespective of no_more_input, update the end_idx to the total
                     // number of messages
-                    n_available_messages = recv_messages.size();
+                    n_available_messages = recv_msg_ids.size();
                     return no_more_input || self_next_idx < n_available_messages;
                 });
                 if (no_more_input && self_next_idx == n_available_messages) {
                     // no more messages will be received, and all messages have been sent
                     break;
                 }
-                // stash msg references under the lock
-                messages_to_send.reserve(n_available_messages - self_next_idx);
-                for (size_t i = self_next_idx; i < n_available_messages; i++) {
-                    messages_to_send.emplace_back(recv_messages[i]);
-                }
+                // copy msg ids to send under the lock
+                msg_ids_to_send.reserve(n_available_messages - self_next_idx);
+                std::ranges::copy(
+                    std::ranges::drop_view(
+                        recv_msg_ids, safe_cast<std::ptrdiff_t>(self_next_idx)
+                    ),
+                    std::back_inserter(msg_ids_to_send)
+                );
             }
 
-            for (auto const& msg : messages_to_send) {
-                RAPIDSMPF_EXPECTS(!msg.get().empty(), "message cannot be empty");
-
-                auto res = ctx.br()->reserve_or_fail(
-                    msg.get().copy_cost(), get_output_memory_types(msg.get())
-                );
-                if (!co_await ch_out->send(msg.get().copy(res))) {
+            for (auto const msg_id : msg_ids_to_send) {
+                auto const cd = spillable_messages->get_content_description(msg_id);
+                // Reserve memory for the output using the input message's memory type, or
+                // a lower-priority type if needed.
+                auto const mem_types = leq_memory_types(cd.principal_memory_type());
+                auto res = ctx.br()->reserve_or_fail(cd.content_size(), mem_types);
+                if (!co_await ch_out->send(spillable_messages->copy(msg_id, res))) {
                     // Failed to send message. Could be that the channel is shut down.
                     // So we need to abort the send task, and notify the process input
                     // task
@@ -243,13 +236,13 @@ struct UnboundedFanout {
                     co_return;
                 }
             }
-            messages_to_send.clear();
+            msg_ids_to_send.clear();
 
             // now next_idx can be updated to end_idx, and if !no_more_input, we need to
             // request the recv task for more data
             auto lock = co_await mtx.scoped_lock();
             self_next_idx = n_available_messages;
-            if (self_next_idx == recv_messages.size()) {
+            if (self_next_idx == recv_msg_ids.size()) {
                 if (no_more_input) {
                     // no more messages will be received, and all messages have been sent
                     break;
@@ -275,7 +268,7 @@ struct UnboundedFanout {
         }
 
         // forcibly set no_more_input to true and notify all send tasks to wind down
-        Node set_input_done() {
+        Actor set_input_done() {
             {
                 auto lock = co_await fanout->mtx.scoped_lock();
                 fanout->no_more_input = true;
@@ -292,14 +285,14 @@ struct UnboundedFanout {
      * index + 1. If both are InvalidIdx, it means that all send tasks are in an invalid
      * state.
      */
-    auto wait_for_data_request() -> coro::task<std::pair<size_t, size_t>> {
-        size_t per_ch_processed_min = InvalidIdx;
-        size_t per_ch_processed_max = InvalidIdx;
+    auto wait_for_data_request() -> coro::task<std::pair<std::size_t, std::size_t>> {
+        std::size_t per_ch_processed_min = InvalidIdx;
+        std::size_t per_ch_processed_max = InvalidIdx;
 
         auto lock = co_await mtx.scoped_lock();
         co_await request_data.wait(lock, [&] {
             auto filtered_view = std::ranges::filter_view(
-                per_ch_processed, [](size_t idx) { return idx != InvalidIdx; }
+                per_ch_processed, [](std::size_t idx) { return idx != InvalidIdx; }
             );
 
             auto it = std::ranges::begin(filtered_view);  // advance to first valid idx
@@ -313,7 +306,7 @@ struct UnboundedFanout {
             per_ch_processed_min = *min_it;
             per_ch_processed_max = *max_it;
 
-            return per_ch_processed_max == recv_messages.size();
+            return per_ch_processed_max == recv_msg_ids.size();
         });
 
         co_return std::make_pair(per_ch_processed_min, per_ch_processed_max);
@@ -326,13 +319,17 @@ struct UnboundedFanout {
      * @param ch_in The input channel to receive messages from.
      * @return A coroutine representing the task.
      */
-    Node recv_task(Context& ctx, std::shared_ptr<Channel> ch_in) {
+    Actor recv_task(Context& ctx, std::shared_ptr<Channel> ch_in) {
         ShutdownAtExit ch_in_shutdown{ch_in};
         SetInputDoneAtExit set_input_done{.fanout = this};
         co_await ctx.executor()->schedule();
 
         // index of the first message to purge
-        size_t purge_idx = 0;
+        std::size_t purge_idx = 0;
+
+        // To make staged input messages spillable, we insert them into the Context's
+        // spillable_messages container while they are in transit.
+        auto spillable_messages = ctx.spillable_messages();
 
         // no_more_input is only set by this task, so reading without lock is safe here
         while (!no_more_input) {
@@ -351,7 +348,7 @@ struct UnboundedFanout {
                 if (msg.empty()) {
                     no_more_input = true;
                 } else {
-                    recv_messages.emplace_back(std::move(msg));
+                    recv_msg_ids.emplace_back(spillable_messages->insert(std::move(msg)));
                 }
             }
 
@@ -362,7 +359,7 @@ struct UnboundedFanout {
             // However the deque is not resized. This guarantees that the indices are not
             // invalidated.
             while (purge_idx < per_ch_processed_min) {
-                recv_messages[purge_idx].reset();
+                std::ignore = spillable_messages->extract(recv_msg_ids[purge_idx]);
                 purge_idx++;
             }
         }
@@ -383,11 +380,11 @@ struct UnboundedFanout {
 
     /// @brief messages received from the input channel. Using a deque to avoid
     /// invalidating references by reallocations.
-    std::deque<Message> recv_messages;
+    std::deque<SpillableMessages::MessageId> recv_msg_ids;
 
     /// @brief number of messages processed for each channel (ie. next index to send for
     /// each channel)
-    std::vector<size_t> per_ch_processed;
+    std::vector<std::size_t> per_ch_processed;
 };
 
 /**
@@ -399,9 +396,9 @@ struct UnboundedFanout {
  * @param ctx The context to use.
  * @param ch_in The input channel to receive messages from.
  * @param chs_out The output channels to send messages to.
- * @return A node representing the unbounded fanout operation.
+ * @return An actor representing the unbounded fanout operation.
  */
-Node unbounded_fanout(
+Actor unbounded_fanout(
     std::shared_ptr<Context> ctx,
     std::shared_ptr<Channel> ch_in,
     std::vector<std::shared_ptr<Channel>> chs_out
@@ -410,13 +407,13 @@ Node unbounded_fanout(
 
     ShutdownAtExit ch_in_shutdown{ch_in};
     ShutdownAtExit chs_out_shutdown{chs_out};
-    co_await ctx->executor()->schedule();
+    co_await executor.schedule();
     UnboundedFanout fanout(chs_out.size());
 
-    std::vector<Node> tasks;
+    std::vector<Actor> tasks;
     tasks.reserve(chs_out.size() + 1);
 
-    for (size_t i = 0; i < chs_out.size(); i++) {
+    for (std::size_t i = 0; i < chs_out.size(); i++) {
         tasks.emplace_back(executor.schedule(
             fanout.send_task(*ctx, fanout.per_ch_processed[i], std::move(chs_out[i]))
         ));
@@ -428,7 +425,7 @@ Node unbounded_fanout(
 
 }  // namespace
 
-Node fanout(
+Actor fanout(
     std::shared_ptr<Context> ctx,
     std::shared_ptr<Channel> ch_in,
     std::vector<std::shared_ptr<Channel>> chs_out,
@@ -450,4 +447,4 @@ Node fanout(
     }
 }
 
-}  // namespace rapidsmpf::streaming::node
+}  // namespace rapidsmpf::streaming::actor

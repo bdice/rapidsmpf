@@ -1,8 +1,7 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-
 
 #include <rapidsmpf/streaming/core/spillable_messages.hpp>
 
@@ -98,4 +97,24 @@ SpillableMessages::get_content_descriptions() const {
     std::unique_lock global_lock(global_mutex_);
     return content_descriptions_;
 }
+
+ContentDescription rapidsmpf::streaming::SpillableMessages::get_content_description(
+    MessageId mid
+) const {
+    std::lock_guard global_lock(global_mutex_);
+    auto it = content_descriptions_.find(mid);
+    RAPIDSMPF_EXPECTS(
+        it != content_descriptions_.end(),
+        "message not found " + std::to_string(mid),
+        std::out_of_range
+    );
+    return it->second;
+}
+
+void SpillableMessages::clear() {
+    std::lock_guard global_lock(global_mutex_);
+    items_.clear();
+    content_descriptions_.clear();
+}
+
 }  // namespace rapidsmpf::streaming

@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
 # SPDX-License-Identifier: Apache-2.0
 
 set -euo pipefail
@@ -19,7 +19,7 @@ ENV_YAML_DIR="$(mktemp -d)"
 
 rapids-logger "Downloading artifacts from previous jobs"
 CPP_CHANNEL=$(rapids-download-conda-from-github cpp)
-PYTHON_CHANNEL=$(rapids-download-conda-from-github python)
+PYTHON_CHANNEL=$(rapids-download-from-github "$(rapids-package-name "conda_python" rapidsmpf --stable --cuda "$RAPIDS_CUDA_VERSION")")
 
 rapids-dependency-file-generator \
   --output conda \
@@ -39,7 +39,7 @@ export RAPIDS_DOCS_DIR
 # Trap ERR so that `EXITCODE` is printed when a command fails and the script
 # exits with error status
 EXITCODE=0
-# shellcheck disable=SC2317
+# shellcheck disable=SC2329
 set_exit_code() {
     EXITCODE=$?
     rapids-logger "Test failed with exit code ${EXITCODE}"

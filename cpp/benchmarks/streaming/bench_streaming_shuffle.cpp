@@ -1,5 +1,5 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,6 +12,7 @@
 
 #include <rapidsmpf/bootstrap/bootstrap.hpp>
 #include <rapidsmpf/bootstrap/ucxx.hpp>
+#include <rapidsmpf/bootstrap/utils.hpp>
 #include <rapidsmpf/communicator/communicator.hpp>
 #include <rapidsmpf/communicator/mpi.hpp>
 #include <rapidsmpf/communicator/ucxx.hpp>
@@ -22,15 +23,15 @@
 #include <rapidsmpf/shuffler/shuffler.hpp>
 #include <rapidsmpf/statistics.hpp>
 #include <rapidsmpf/streaming/coll/shuffler.hpp>
+#include <rapidsmpf/streaming/core/actor.hpp>
 #include <rapidsmpf/streaming/core/channel.hpp>
 #include <rapidsmpf/streaming/core/context.hpp>
-#include <rapidsmpf/streaming/core/node.hpp>
 #include <rapidsmpf/streaming/cudf/partition.hpp>
 #include <rapidsmpf/streaming/cudf/table_chunk.hpp>
-#include <rapidsmpf/utils.hpp>
+#include <rapidsmpf/utils/string.hpp>
 
 #include "../utils/misc.hpp"
-#include "../utils/rmm_stack.hpp"
+#include "../utils/rmm_utils.hpp"
 #include "data_generator.hpp"
 
 class ArgumentParser {
@@ -52,7 +53,7 @@ class ArgumentParser {
         }
         try {
             int option;
-            while ((option = getopt(argc, argv, "C:r:w:c:n:p:o:m:l:xh")) != -1) {
+            while ((option = getopt(argc, argv, "C:r:w:c:n:p:o:m:l:Lxh")) != -1) {
                 switch (option) {
                 case 'h':
                     {
@@ -70,10 +71,11 @@ class ArgumentParser {
                            << "  -o <num>   Number of output partitions per rank "
                               "(default: 1)\n"
                            << "  -m <mr>    RMM memory resource {cuda, pool, async, "
-                              "managed} "
-                              "(default: pool)\n"
+                              "managed} (default: pool)\n"
                            << "  -l <num>   Device memory limit in MiB (default:-1, "
-                              "disabled)\n"
+                              "unlimited)\n"
+                           << "  -L         Disable Pinned host memory (default: "
+                              " unlimited)\n"
                            << "  -x         Enable memory profiler (default: disabled)\n"
                            << "  -h         Display this help message\n";
                         if (rank == 0) {
@@ -138,6 +140,9 @@ class ArgumentParser {
                 case 'l':
                     parse_integer(device_mem_limit_mb, optarg);
                     break;
+                case 'L':
+                    pinned_mem_disable = true;
+                    break;
                 case 'x':
                     enable_memory_profiler = true;
                     break;
@@ -199,12 +204,15 @@ class ArgumentParser {
         if (device_mem_limit_mb >= 0) {
             ss << "  -l " << device_mem_limit_mb << " (device memory limit in MiB)\n";
         }
+        if (pinned_mem_disable) {
+            ss << "  -L (disable pinned host memory)\n";
+        }
         if (enable_memory_profiler) {
             ss << "  -x (enable memory profiling)\n";
         }
         ss << "Local size: " << rapidsmpf::format_nbytes(local_nbytes) << "\n";
         ss << "Total size: " << rapidsmpf::format_nbytes(total_nbytes) << "\n";
-        comm.logger().print(ss.str());
+        comm.logger()->print(ss.str());
     }
 
     std::uint64_t num_runs{1};
@@ -219,9 +227,10 @@ class ArgumentParser {
     std::uint64_t total_nbytes;
     bool enable_memory_profiler{false};
     std::int64_t device_mem_limit_mb{-1};
+    bool pinned_mem_disable{false};
 };
 
-rapidsmpf::streaming::Node consumer(
+rapidsmpf::streaming::Actor consumer(
     std::shared_ptr<rapidsmpf::streaming::Context> ctx,
     std::shared_ptr<rapidsmpf::streaming::Channel> ch_in
 ) {
@@ -237,24 +246,25 @@ rapidsmpf::streaming::Node consumer(
 
 rapidsmpf::Duration run(
     std::shared_ptr<rapidsmpf::streaming::Context> ctx,
+    std::shared_ptr<rapidsmpf::Communicator> comm,
     ArgumentParser const& args,
     rmm::cuda_stream_view stream
 ) {
     constexpr std::int32_t min_val = 0;
     constexpr std::int32_t max_val = 10;
     constexpr cudf::hash_id hash_function = cudf::hash_id::HASH_MURMUR3;
-    constexpr uint32_t seed = cudf::DEFAULT_HASH_SEED;
+    constexpr std::uint32_t seed = cudf::DEFAULT_HASH_SEED;
     rapidsmpf::shuffler::PartID const total_num_partitions =
         args.num_output_partitions
-        * static_cast<rapidsmpf::shuffler::PartID>(ctx->comm()->nranks());
+        * static_cast<rapidsmpf::shuffler::PartID>(comm->nranks());
     constexpr rapidsmpf::OpID op_id = 0;
 
     // Create streaming pipeline.
-    std::vector<rapidsmpf::streaming::Node> nodes;
+    std::vector<rapidsmpf::streaming::Actor> actors;
     {
         auto ch1 = ctx->create_channel();
-        nodes.push_back(
-            rapidsmpf::streaming::node::random_table_generator(
+        actors.push_back(
+            rapidsmpf::streaming::actor::random_table_generator(
                 ctx,
                 stream,
                 ch1,
@@ -266,8 +276,8 @@ rapidsmpf::Duration run(
             )
         );
         auto ch2 = ctx->create_channel();
-        nodes.push_back(
-            rapidsmpf::streaming::node::partition_and_pack(
+        actors.push_back(
+            rapidsmpf::streaming::actor::partition_and_pack(
                 ctx,
                 ch1,
                 ch2,
@@ -278,17 +288,17 @@ rapidsmpf::Duration run(
             )
         );
         auto ch3 = ctx->create_channel();
-        nodes.push_back(
-            rapidsmpf::streaming::node::shuffler(
-                ctx, ch2, ch3, op_id, total_num_partitions
+        actors.push_back(
+            rapidsmpf::streaming::actor::shuffler(
+                ctx, comm, ch2, ch3, op_id, total_num_partitions
             )
         );
         auto ch4 = ctx->create_channel();
-        nodes.push_back(rapidsmpf::streaming::node::unpack_and_concat(ctx, ch3, ch4));
-        nodes.push_back(consumer(ctx, ch4));
+        actors.push_back(rapidsmpf::streaming::actor::unpack_and_concat(ctx, ch3, ch4));
+        actors.push_back(consumer(ctx, ch4));
     }
     auto const t0_elapsed = rapidsmpf::Clock::now();
-    rapidsmpf::streaming::run_streaming_pipeline(std::move(nodes));
+    rapidsmpf::streaming::run_actor_network(std::move(actors));
     return rapidsmpf::Clock::now() - t0_elapsed;
 }
 
@@ -310,27 +320,29 @@ int main(int argc, char** argv) {
 
     // Initialize configuration options from environment variables.
     rapidsmpf::config::Options options{rapidsmpf::config::get_environment_variables()};
+    auto progress_thread = std::make_shared<rapidsmpf::ProgressThread>();
 
     std::shared_ptr<rapidsmpf::Communicator> comm;
     if (args.comm_type == "mpi") {
         if (use_bootstrap) {
             std::cerr
                 << "Error: MPI communicator requires MPI initialization. Don't use with "
-                   "rrun or unset RAPIDSMPF_RANK."
+                   "rrun or unset RRUN_RANK."
                 << std::endl;
             return 1;
         }
         rapidsmpf::mpi::init(&argc, &argv);
-        comm = std::make_shared<rapidsmpf::MPI>(MPI_COMM_WORLD, options);
+        comm = std::make_shared<rapidsmpf::MPI>(MPI_COMM_WORLD, options, progress_thread);
     } else if (args.comm_type == "ucxx") {
         if (use_bootstrap) {
             // Launched with rrun - use bootstrap backend
             comm = rapidsmpf::bootstrap::create_ucxx_comm(
-                rapidsmpf::bootstrap::Backend::AUTO, options
+                progress_thread, rapidsmpf::bootstrap::BackendType::AUTO, options
             );
         } else {
             // Launched with mpirun - use MPI bootstrap
-            comm = rapidsmpf::ucxx::init_using_mpi(MPI_COMM_WORLD, options);
+            comm =
+                rapidsmpf::ucxx::init_using_mpi(MPI_COMM_WORLD, options, progress_thread);
         }
     } else {
         std::cerr << "Error: Unknown communicator type: " << args.comm_type << std::endl;
@@ -341,25 +353,33 @@ int main(int argc, char** argv) {
 
     RAPIDSMPF_EXPECTS(comm->nranks() == 1, "only single-rank runs are supported");
 
-    auto const mr_stack = set_current_rmm_stack(args.rmm_mr);
-    std::shared_ptr<rapidsmpf::RmmResourceAdaptor> stat_enabled_mr;
-    if (args.enable_memory_profiler || args.device_mem_limit_mb >= 0) {
-        stat_enabled_mr = set_device_mem_resource_with_stats();
-    }
-
+    set_current_rmm_resource(args.rmm_mr);
+    auto stat_enabled_mr = set_device_mem_resource_with_stats();
     std::unordered_map<rapidsmpf::MemoryType, rapidsmpf::BufferResource::MemoryAvailable>
         memory_available{};
     if (args.device_mem_limit_mb >= 0) {
         memory_available[rapidsmpf::MemoryType::DEVICE] = rapidsmpf::LimitAvailableMemory{
-            stat_enabled_mr.get(), args.device_mem_limit_mb << 20
+            stat_enabled_mr, args.device_mem_limit_mb << 20
         };
     }
 
-    rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref();
-    auto br =
-        std::make_shared<rapidsmpf::BufferResource>(mr, std::move(memory_available));
+    auto stats = std::make_shared<rapidsmpf::Statistics>(/* enable = */ true);
 
-    auto& log = comm->logger();
+    auto pinned_mr = args.pinned_mem_disable
+                         ? rapidsmpf::PinnedMemoryResource::Disabled
+                         : rapidsmpf::PinnedMemoryResource::make_if_available();
+    auto br = std::make_shared<rapidsmpf::BufferResource>(
+        stat_enabled_mr,
+        pinned_mr,
+        std::move(memory_available),
+        std::nullopt,
+        std::make_shared<rmm::cuda_stream_pool>(
+            16, rmm::cuda_stream::flags::non_blocking
+        ),
+        stats
+    );
+
+    auto& log = *comm->logger();
     rmm::cuda_stream_view stream = cudf::get_default_stream();
 
     // Print benchmark/hardware info.
@@ -382,26 +402,20 @@ int main(int argc, char** argv) {
         log.print(ss.str());
     }
 
-    // We start with disabled statistics.
-    auto stats = std::make_shared<rapidsmpf::Statistics>(/* enable = */ false);
-
-    auto ctx = std::make_shared<rapidsmpf::streaming::Context>(options, comm, br, stats);
+    auto ctx =
+        std::make_shared<rapidsmpf::streaming::Context>(options, comm->logger(), br);
 
     std::vector<double> elapsed_vec;
     std::uint64_t const total_num_runs = args.num_warmups + args.num_runs;
     for (std::uint64_t i = 0; i < total_num_runs; ++i) {
-        // Enable statistics for the last run.
+        // Clear statistics before the last run so only the final run is reported.
         if (i == total_num_runs - 1) {
-            if (args.enable_memory_profiler) {
-                stats = std::make_shared<rapidsmpf::Statistics>(stat_enabled_mr.get());
-            } else {
-                stats = std::make_shared<rapidsmpf::Statistics>(/* enable = */ true);
-            }
+            ctx->statistics()->clear();
         }
-        double const elapsed = run(ctx, args, stream).count();
+        double const elapsed = run(ctx, comm, args, stream).count();
         std::stringstream ss;
-        ss << "elapsed: " << rapidsmpf::to_precision(elapsed)
-           << " sec | local throughput: "
+        ss << "elapsed: " << rapidsmpf::format_duration(elapsed)
+           << " | local throughput: "
            << rapidsmpf::format_nbytes(args.local_nbytes / elapsed)
            << "/s | global throughput: "
            << rapidsmpf::format_nbytes(args.total_nbytes / elapsed) << "/s";
@@ -423,8 +437,8 @@ int main(int argc, char** argv) {
     {
         auto const elapsed_mean = harmonic_mean(elapsed_vec);
         std::stringstream ss;
-        ss << "means: " << rapidsmpf::to_precision(elapsed_mean)
-           << " sec | local throughput: "
+        ss << "means: " << rapidsmpf::format_duration(elapsed_mean)
+           << " | local throughput: "
            << rapidsmpf::format_nbytes(args.local_nbytes / elapsed_mean)
            << "/s | global throughput: "
            << rapidsmpf::format_nbytes(args.total_nbytes / elapsed_mean) << "/s"
@@ -432,7 +446,7 @@ int main(int argc, char** argv) {
            << " | out_parts: " << args.num_output_partitions
            << " | nranks: " << comm->nranks();
         if (args.enable_memory_profiler) {
-            auto record = stat_enabled_mr->get_main_record();
+            auto record = stat_enabled_mr.get_main_record();
             ss << " | device memory peak: " << rapidsmpf::format_nbytes(record.peak())
                << " | device memory total: "
                << rapidsmpf::format_nbytes(
@@ -442,7 +456,17 @@ int main(int argc, char** argv) {
         }
         log.print(ss.str());
     }
-    log.print(stats->report("Statistics (of the last run):"));
+
+    if (args.enable_memory_profiler) {
+        log.print(ctx->statistics()->report({
+            .mr = stat_enabled_mr,
+            .pinned_mr = pinned_mr,
+            .header = "Statistics (of the last run):",
+        }));
+    } else {
+        log.print(ctx->statistics()->report({.header = "Statistics (of the last run):"}));
+    }
+
     if (!use_bootstrap) {
         RAPIDSMPF_MPI(MPI_Finalize());
     }

@@ -7,6 +7,11 @@ FROM ${BASE} as pip-base
 
 ENV DEFAULT_VIRTUAL_ENV=rapids
 
+# Install libnuma-dev for cuCascade dependency (pip devcontainers only)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 FROM ${BASE} as conda-base
 
 ENV DEFAULT_CONDA_ENV=rapids
@@ -31,7 +36,8 @@ ENV HISTFILE="/home/coder/.cache/._bash_history"
 ###
 # sccache configuration
 ###
-ENV AWS_ROLE_ARN="arn:aws:iam::279114543810:role/nv-gha-token-sccache-devs"
+ENV AWS_IDP_URL="https://token.rapids.nvidia.com"
+ENV AWS_ROLE_ARN="arn:aws:iam::279114543810:role/rapids-token-sccache-devs"
 ENV SCCACHE_REGION="us-east-2"
 ENV SCCACHE_BUCKET="rapids-sccache-devs"
 ENV SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE=true

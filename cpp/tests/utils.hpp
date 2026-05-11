@@ -1,31 +1,94 @@
 /**
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <numeric>
 #include <random>
 #include <span>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <unistd.h>
+
+#include <cuda/memory_resource>
 
 #include <cudf/sorting.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf_test/column_wrapper.hpp>
+#include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <rapidsmpf/error.hpp>
+#include <rapidsmpf/memory/buffer_resource.hpp>
 #include <rapidsmpf/memory/packed_data.hpp>
 
 /**
- * @brief User-defined literal for specifying memory sizes in MiB.
+ * @brief RAII temporary directory created under GTest's temp directory.
+ *
+ * The directory is created on construction and recursively removed on
+ * destruction. Removal errors are ignored.
  */
+class TempDir {
+  public:
+    TempDir() : path_(unique_path()) {
+        std::error_code ec;
+        if (!std::filesystem::create_directories(path_, ec) || ec) {
+            throw std::runtime_error(
+                "Failed to create temp directory: " + path_.string()
+            );
+        }
+    }
+
+    ~TempDir() noexcept {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+        // Intentionally ignore errors in destructor.
+    }
+
+    TempDir(TempDir const&) = delete;
+    TempDir& operator=(TempDir const&) = delete;
+    TempDir(TempDir&&) = delete;
+    TempDir& operator=(TempDir&&) = delete;
+
+    /// @brief Returns the path to the temporary directory.
+    [[nodiscard]] std::filesystem::path const& path() const noexcept {
+        return path_;
+    }
+
+  private:
+    static std::filesystem::path unique_path() {
+        static std::atomic<std::uint64_t> counter{0};
+        return std::filesystem::path(testing::TempDir())
+               / ("tmp_" + std::to_string(::getpid()) + "_"
+                  + std::to_string(counter.fetch_add(1, std::memory_order_relaxed)));
+    }
+
+    std::filesystem::path path_;
+};
+
+/// @brief User-defined literal for specifying memory sizes in KiB.
+constexpr std::size_t operator"" _KiB(unsigned long long val) {
+    return val * (1 << 10);
+}
+
+/// @brief User-defined literal for specifying memory sizes in MiB.
 constexpr std::size_t operator"" _MiB(unsigned long long val) {
     return val * (1ull << 20);
+}
+
+/// @brief User-defined literal for specifying memory sizes in GiB.
+constexpr std::size_t operator"" _GiB(unsigned long long val) {
+    return val * (1 << 30);
 }
 
 template <typename T>
@@ -85,6 +148,9 @@ template <std::integral T = std::int64_t>
     cudf::table_view const& table,
     std::vector<cudf::size_type> const& /* column_indices */ = {0}
 ) {
+    if (table.num_columns() == 0) {
+        return cudf::table(table);
+    }
     return cudf::gather(table, cudf::sorted_order(table.select({0}))->view())->release();
 }
 
@@ -97,15 +163,17 @@ template <std::integral T = std::int64_t>
 
 /// @brief Create a PackedData object from a host buffer
 [[nodiscard]] inline rapidsmpf::PackedData create_packed_data(
-    std::span<uint8_t const> metadata,
-    std::span<uint8_t const> data,
+    std::span<std::uint8_t const> metadata,
+    std::span<std::uint8_t const> data,
     rmm::cuda_stream_view stream,
     rapidsmpf::BufferResource* br
 ) {
     auto metadata_ptr =
-        std::make_unique<std::vector<uint8_t>>(metadata.begin(), metadata.end());
+        std::make_unique<std::vector<std::uint8_t>>(metadata.begin(), metadata.end());
 
-    auto reservation = br->reserve(rapidsmpf::MemoryType::DEVICE, data.size(), true);
+    auto reservation = br->reserve(
+        rapidsmpf::MemoryType::DEVICE, data.size(), rapidsmpf::AllowOverbooking::YES
+    );
     auto data_ptr =
         std::make_unique<rmm::device_buffer>(data.data(), data.size(), stream);
     return rapidsmpf::PackedData{
@@ -132,7 +200,7 @@ template <std::integral T = std::int64_t>
 ) {
     auto values = iota_vector<int>(n_elements, offset);
 
-    auto metadata = std::make_unique<std::vector<uint8_t>>(n_elements * sizeof(int));
+    auto metadata = std::make_unique<std::vector<std::uint8_t>>(n_elements * sizeof(int));
     std::memcpy(metadata->data(), values.data(), n_elements * sizeof(int));
 
     auto data = std::make_unique<rmm::device_buffer>(
@@ -174,3 +242,78 @@ inline void validate_packed_data(
     RAPIDSMPF_CUDA_TRY(cudaStreamSynchronize(stream));
     EXPECT_EQ(metadata, data_on_host->copy_to_uint8_vector());
 }
+
+/**
+ * @brief Device memory resource that can inject stream-ordered delays.
+ *
+ * When enabled, each allocation enqueues a host callback on the allocation
+ * stream that sleeps for a configurable duration. This blocks the CUDA stream
+ * (making `cudaEventQuery` return not-ready) without blocking the host thread,
+ * so the progress thread's event loop continues to run while data buffers
+ * appear unready.
+ */
+class DelayedMemoryResource {
+  public:
+    DelayedMemoryResource(
+        rmm::device_async_resource_ref upstream, std::chrono::milliseconds delay
+    )
+        : upstream_{upstream}, delay_{delay} {}
+
+    void* allocate_sync(std::size_t, std::size_t) {
+        RAPIDSMPF_FAIL("synchronous allocation not supported", std::invalid_argument);
+    }
+
+    void deallocate_sync(void*, std::size_t, std::size_t) noexcept {
+        RAPIDSMPF_FATAL("synchronous deallocation not supported");
+    }
+
+    void* allocate(
+        rmm::cuda_stream_view stream,
+        std::size_t size,
+        std::size_t alignment = rmm::CUDA_ALLOCATION_ALIGNMENT
+    ) {
+        void* ptr = upstream_.allocate(stream, size, alignment);
+        if (size > 0) {
+            RAPIDSMPF_CUDA_TRY(cudaLaunchHostFunc(
+                stream.value(), sleep_on_stream, new std::chrono::milliseconds(delay_)
+            ));
+        }
+        return ptr;
+    }
+
+    void deallocate(
+        rmm::cuda_stream_view stream,
+        void* ptr,
+        std::size_t size,
+        std::size_t alignment = rmm::CUDA_ALLOCATION_ALIGNMENT
+    ) noexcept {
+        upstream_.deallocate(stream, ptr, size, alignment);
+    }
+
+    bool operator==(DelayedMemoryResource const& other) const noexcept {
+        return this == &other;
+    }
+
+    bool operator!=(DelayedMemoryResource const& other) const noexcept {
+        return !(this == &other);
+    }
+
+    friend void get_property(
+        DelayedMemoryResource const&, cuda::mr::device_accessible
+    ) noexcept {}
+
+  private:
+    static void CUDART_CB sleep_on_stream(void* user_data) {
+        auto* delay = static_cast<std::chrono::milliseconds*>(user_data);
+        std::this_thread::sleep_for(*delay);
+        delete delay;
+    }
+
+    cuda::mr::any_resource<cuda::mr::device_accessible> upstream_;
+    std::chrono::milliseconds delay_;
+};
+
+static_assert(cuda::mr::resource<DelayedMemoryResource>);
+static_assert(
+    cuda::mr::resource_with<DelayedMemoryResource, cuda::mr::device_accessible>
+);

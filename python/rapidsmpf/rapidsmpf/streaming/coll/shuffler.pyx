@@ -1,190 +1,130 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_INCREF
 from cython.operator cimport dereference as deref
-from libc.stdint cimport uint8_t, uint32_t
+from libc.stdint cimport int32_t, uint32_t
 from libcpp.memory cimport make_unique, shared_ptr
-from libcpp.optional cimport optional
-from libcpp.utility cimport move, pair
+from libcpp.span cimport span
+from libcpp.unordered_map cimport unordered_map
+from libcpp.utility cimport move
 from libcpp.vector cimport vector
 
-import asyncio
-from functools import partial
-
+from rapidsmpf._detail.exception_handling cimport ex_handler
+from rapidsmpf.communicator.communicator cimport Communicator
+# Need the header include for inline C++ code
+from rapidsmpf.memory.buffer_resource cimport BufferResource  # no-cython-lint
 from rapidsmpf.memory.packed_data cimport (PackedData, cpp_PackedData,
                                            packed_data_vector_to_list)
 from rapidsmpf.owning_wrapper cimport cpp_OwningWrapper
-from rapidsmpf.shuffler cimport cpp_insert_chunk_into_partition_map
+from rapidsmpf.shuffler cimport (PartitionAssignment,
+                                 cpp_insert_chunk_into_partition_map,
+                                 cpp_Shuffler)
+from rapidsmpf.streaming._detail.libcoro_spawn_task cimport cpp_set_py_future
 from rapidsmpf.streaming.chunks.utils cimport py_deleter
+from rapidsmpf.streaming.coll.shuffler cimport cpp_ShufflerAsync
+from rapidsmpf.streaming.core.actor cimport CppActor, cpp_Actor
 from rapidsmpf.streaming.core.channel cimport Channel
 from rapidsmpf.streaming.core.context cimport Context, cpp_Context
-from rapidsmpf.streaming.core.node cimport CppNode, cpp_Node
-from rapidsmpf.streaming.core.utilities cimport cython_invoke_python_function
+
+import asyncio
 
 
 cdef extern from * nogil:
     """
     namespace {
-    coro::task<void> _extract_async_task(
-        rapidsmpf::streaming::ShufflerAsync *shuffle,
-        std::uint32_t pid,
-        std::optional<std::vector<rapidsmpf::PackedData>> &output,
-        void (*py_invoker)(void*),
-        rapidsmpf::OwningWrapper py_callback
-    ) {
-        output = co_await shuffle->extract_async(pid);
-        py_invoker(py_callback.get());
-    }
-
-    void cpp_extract_async(
-        std::shared_ptr<rapidsmpf::streaming::Context> ctx,
-        rapidsmpf::streaming::ShufflerAsync *shuffle,
-        std::uint32_t pid,
-        std::optional<std::vector<rapidsmpf::PackedData>> &output,
-        void (*py_invoker)(void*),
-        rapidsmpf::OwningWrapper py_callback
-    ) {
-        RAPIDSMPF_EXPECTS(
-            ctx->executor()->spawn(
-                 _extract_async_task(
-                     shuffle, pid, output, py_invoker, std::move(py_callback)
-                 )
-            ),
-            "could not spawn task on thread pool"
-        );
-    }
-
-    coro::task<void> _extract_any_async_task(
-        rapidsmpf::streaming::ShufflerAsync *shuffle,
-        std::optional<std::pair<std::uint32_t, std::vector<rapidsmpf::PackedData>>>
-            &output,
-        void (*py_invoker)(void*),
-        rapidsmpf::OwningWrapper py_callback
-    ) {
-        output = co_await shuffle->extract_any_async();
-        py_invoker(py_callback.get());
-    }
-
-    void cpp_extract_any_async(
-        std::shared_ptr<rapidsmpf::streaming::Context> ctx,
-        rapidsmpf::streaming::ShufflerAsync *shuffle,
-        std::optional<std::pair<std::uint32_t, std::vector<rapidsmpf::PackedData>>>
-            &output,
-        void (*py_invoker)(void*),
-        rapidsmpf::OwningWrapper py_callback
-    ) {
-        RAPIDSMPF_EXPECTS(
-            ctx->executor()->spawn(
-                 _extract_any_async_task(
-                     shuffle, output, py_invoker, std::move(py_callback)
-                 )
-            ),
-            "could not spawn task on thread pool"
-        );
-    }
-
-    coro::task<void> _insert_finished_task(
-        rapidsmpf::streaming::ShufflerAsync *shuffle,
-        void (*py_invoker)(void*),
-        rapidsmpf::OwningWrapper py_callback
+    coro::task<void> insert_finished_task(
+        rapidsmpf::streaming::ShufflerAsync *shuffle
     ) {
         co_await shuffle->insert_finished();
-        py_invoker(py_callback.get());
     }
 
     void cpp_insert_finished(
         std::shared_ptr<rapidsmpf::streaming::Context> ctx,
         rapidsmpf::streaming::ShufflerAsync *shuffle,
-        void (*py_invoker)(void*),
-        rapidsmpf::OwningWrapper py_callback
+        void (*cpp_set_py_future)(void*, const char *),
+        rapidsmpf::OwningWrapper py_future
     ) {
         RAPIDSMPF_EXPECTS(
-            ctx->executor()->spawn(
-                 _insert_finished_task(
-                     shuffle, py_invoker, std::move(py_callback)
-                 )
+            ctx->executor()->spawn_detached(
+                cython_libcoro_task_wrapper(
+                    cpp_set_py_future,
+                    std::move(py_future),
+                    insert_finished_task(shuffle)
+                )
             ),
-            "could not spawn task on thread pool"
+            "libcoro's spawn_detached() failed to spawn task"
         );
     }
-    }
+    }  // namespace
     """
-    void cpp_extract_async(
-        shared_ptr[cpp_Context] ctx,
-        cpp_ShufflerAsync *shuffle,
-        uint32_t pid,
-        optional[vector[cpp_PackedData]] &output,
-        void (*py_invoker)(void*),
-        cpp_OwningWrapper py_callback,
-    ) except +
-
-    void cpp_extract_any_async(
-        shared_ptr[cpp_Context] ctx,
-        cpp_ShufflerAsync *shuffle,
-        optional[pair[uint32_t, vector[cpp_PackedData]]] &output,
-        void (*py_invoker)(void*),
-        cpp_OwningWrapper py_callback,
-    ) except +
-
     void cpp_insert_finished(
         shared_ptr[cpp_Context] ctx,
         cpp_ShufflerAsync *shuffle,
-        void (*py_invoker)(void*),
-        cpp_OwningWrapper py_callback,
-    ) except +
+        void (*cpp_set_py_future)(void*, const char *),
+        cpp_OwningWrapper py_future
+    ) except +ex_handler
 
 
 def shuffler(
     Context ctx not None,
+    Communicator comm not None,
     Channel ch_in not None,
     Channel ch_out not None,
-    uint8_t op_id,
+    int32_t op_id,
     uint32_t total_num_partitions,
+    PartitionAssignment partition_assignment = PartitionAssignment.ROUND_ROBIN
 ):
     """
-    Launch a shuffler node for a single shuffle operation.
+    Launch a shuffler actor for a single shuffle operation.
 
-    Streaming variant of the RapdisMPF shuffler that reads packed, partitioned
+    Streaming variant of the RapidsMPF shuffler that reads packed, partitioned
     input chunks from an input channel and emits output chunks grouped by
     partition owner.
 
     Parameters
     ----------
     ctx
-        The node context to use.
+        The actor context to use.
+    comm
+        The communicator the shuffle is collective over.
     ch_in
         Input channel that supplies partitioned map chunks to be shuffled.
     ch_out
         Output channel that receives the grouped (vector) chunks.
     op_id
         Unique identifier for this shuffle operation. Must not be reused until
-        all nodes participating in the shuffle have shut down.
+        all actors participating in the shuffle have shut down.
     total_num_partitions
         Total number of logical partitions to shuffle the data into.
+    partition_assignment
+        How to assign partition IDs to ranks: :attr:`~.PartitionAssignment.ROUND_ROBIN`
+        (default) for load balance (e.g. hash shuffle), or
+        :attr:`~.PartitionAssignment.CONTIGUOUS` so each rank gets a contiguous range
+        of partition IDs (e.g. for sort so concatenation order matches global order).
+        A custom callable may be supported in the future.
 
     Returns
     -------
-    A streaming node that finishes when shuffling is complete and `ch_out` has
+    A streaming actor that finishes when shuffling is complete and `ch_out` has
     been drained.
 
-    Notes
-    -----
-    Partition ownership is assigned per the underlying C++ implementation's default
-    policy (round-robin across ranks/nodes).
     """
 
-    cdef cpp_Node _ret
     with nogil:
         _ret = cpp_shuffler(
             ctx._handle,
+            comm._handle,
             ch_in._handle,
             ch_out._handle,
             op_id,
             total_num_partitions,
+            cpp_Shuffler.round_robin
+            if partition_assignment == PartitionAssignment.ROUND_ROBIN
+            else cpp_Shuffler.contiguous,
         )
-    return CppNode.from_handle(make_unique[cpp_Node](move(_ret)), owner=None)
+    return CppActor.from_handle(make_unique[cpp_Actor](move(_ret)), owner=None)
 
 
 cdef class ShufflerAsync:
@@ -195,23 +135,52 @@ cdef class ShufflerAsync:
     ----------
     ctx
         Streaming context
+    comm
+        The communicator the shuffle is collective over.
     op_id
         Operation id identifying this shuffle. Must not be reused while
         this object is still live.
     total_num_partitions
         Global number of output partitions in the shuffle.
+    partition_assignment
+        How to assign partition IDs to ranks: :attr:`~.PartitionAssignment.ROUND_ROBIN`
+        (default) for load balance (e.g. hash shuffle), or
+        :attr:`~.PartitionAssignment.CONTIGUOUS` so each rank gets a contiguous range
+        of partition IDs (e.g. for sort so concatenation order matches global order).
+        A custom callable may be supported in the future.
     """
     def __init__(
-        self, Context ctx not None, uint8_t op_id, uint32_t total_num_partitions
+        self,
+        Context ctx not None,
+        Communicator comm not None,
+        int32_t op_id,
+        uint32_t total_num_partitions,
+        PartitionAssignment partition_assignment = PartitionAssignment.ROUND_ROBIN,
     ):
+        self._comm = comm
+        self._br = ctx.br()
         with nogil:
             self._handle = make_unique[cpp_ShufflerAsync](
-                ctx._handle, op_id, total_num_partitions
+                ctx._handle, comm._handle, op_id, total_num_partitions,
+                cpp_Shuffler.round_robin
+                if partition_assignment == PartitionAssignment.ROUND_ROBIN
+                else cpp_Shuffler.contiguous,
             )
 
     def __dealloc__(self):
         with nogil:
             self._handle.reset()
+
+    @property
+    def comm(self):
+        """
+        Get the communicator used by the shuffler.
+
+        Returns
+        -------
+        The communicator.
+        """
+        return self._comm
 
     def insert(self, chunks):
         """
@@ -231,7 +200,8 @@ cdef class ShufflerAsync:
             cpp_insert_chunk_into_partition_map(
                 c_chunks, pid, move((<PackedData>chunk).c_obj)
             )
-        deref(self._handle).insert(move(c_chunks))
+        with nogil:
+            deref(self._handle).insert(move(c_chunks))
 
     async def insert_finished(self, Context ctx not None):
         """
@@ -241,92 +211,50 @@ cdef class ShufflerAsync:
         -----
         This must be awaited before extraction can occur.
         """
-        loop = asyncio.get_running_loop()
-        ret = loop.create_future()
-        callback = partial(loop.call_soon_threadsafe, partial(ret.set_result, None))
-        Py_INCREF(callback)
+        ret = asyncio.get_running_loop().create_future()
+        Py_INCREF(ret)
         with nogil:
             cpp_insert_finished(
                 ctx._handle,
                 self._handle.get(),
-                cython_invoke_python_function,
-                move(cpp_OwningWrapper(<void*><PyObject*>callback, py_deleter))
+                cpp_set_py_future,
+                move(cpp_OwningWrapper(<void*><PyObject*>ret, py_deleter))
             )
         await ret
 
-    async def extract_async(self, Context ctx not None, uint32_t pid):
+    def extract(self, uint32_t pid):
         """
-        Suspend and extract a partition from the shuffle.
+        Extract all chunks belonging to the specified partition.
+
+        Must only be called after awaiting :meth:`insert_finished`.
 
         Parameters
         ----------
-        ctx
-            Streaming context.
         pid
             The partition to extract.
 
         Returns
         -------
         list[PackedData]
-            The PackedData representing the extracted partition.
-        None
-            If the partition has already been extracted.
+            The PackedData chunks associated with the partition.
         """
-        loop = asyncio.get_running_loop()
-        ret = loop.create_future()
-        callback = partial(loop.call_soon_threadsafe, partial(ret.set_result, None))
-        cdef optional[vector[cpp_PackedData]] c_ret
-        Py_INCREF(callback)
+        cdef vector[cpp_PackedData] c_ret
         with nogil:
-            cpp_extract_async(
-                ctx._handle,
-                self._handle.get(),
-                pid,
-                c_ret,
-                cython_invoke_python_function,
-                move(cpp_OwningWrapper(<void*><PyObject*>callback, py_deleter))
-            )
-        await ret
-        if c_ret.has_value():
-            return packed_data_vector_to_list(move(deref(c_ret)))
-        else:
-            return None
+            c_ret = deref(self._handle).extract(pid)
+        return packed_data_vector_to_list(move(c_ret), self._br)
 
-    async def extract_any_async(self, Context ctx not None):
+    def local_partitions(self):
         """
-        Suspend and extract any partition from the shuffle.
-
-        Parameters
-        ----------
-        ctx
-            Streaming context.
+        Return the partition IDs owned by this rank.
 
         Returns
         -------
-        tuple[int, list[PackedData]]
-            The identifier for the extracted partition and the PackedData
-            of the partition.
-        None
-            If there are no more partitions to extract.
+        Partition IDs owned by this shuffler.
         """
-        loop = asyncio.get_running_loop()
-        ret = loop.create_future()
-        callback = partial(loop.call_soon_threadsafe, partial(ret.set_result, None))
-        cdef optional[pair[uint32_t, vector[cpp_PackedData]]] c_ret
-        Py_INCREF(callback)
+        cdef span[const uint32_t] _ret
+        cdef list partitions = []
         with nogil:
-            cpp_extract_any_async(
-                ctx._handle,
-                self._handle.get(),
-                c_ret,
-                cython_invoke_python_function,
-                move(cpp_OwningWrapper(<void*><PyObject*>callback, py_deleter))
-            )
-        await ret
-        if c_ret.has_value():
-            return (
-                c_ret.value().first,
-                packed_data_vector_to_list(move(deref(c_ret).second))
-            )
-        else:
-            return None
+            _ret = deref(self._handle).local_partitions()
+        for pid in _ret:
+            partitions.append(pid)
+        return partitions
