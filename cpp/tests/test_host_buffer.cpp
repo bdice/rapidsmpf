@@ -111,7 +111,7 @@ TEST_P(HostMemoryResource, from_owned_vector) {
 
     // Create a host buffer by taking ownership of a vector
     auto buffer = rapidsmpf::HostBuffer::from_owned_vector(
-        std::vector<std::uint8_t>(source_data), stream, mr
+        std::vector<std::uint8_t>(source_data), stream
     );
 
     EXPECT_NO_THROW(test_buffer(std::move(buffer), source_data));
@@ -181,7 +181,7 @@ TEST_P(PinnedResource, from_owned_vector) {
 
     // Create a host buffer by taking ownership of a vector
     auto buffer = rapidsmpf::HostBuffer::from_owned_vector(
-        std::vector<std::uint8_t>(source_data), stream, *mr
+        std::vector<std::uint8_t>(source_data), stream
     );
 
     EXPECT_NO_THROW(test_buffer(std::move(buffer), source_data));
@@ -200,7 +200,7 @@ TEST_P(PinnedResource, from_rmm_device_buffer) {
 
     // Create a host buffer by taking ownership of an rmm::device_buffer
     auto buffer = rapidsmpf::HostBuffer::from_rmm_device_buffer(
-        std::move(pinned_host_buffer), stream, *mr
+        std::move(pinned_host_buffer), stream
     );
 
     EXPECT_NO_THROW(test_buffer(std::move(buffer), source_data));
@@ -215,6 +215,30 @@ TEST(PinnedResource, equality) {
     EXPECT_EQ(*mr1, mr2);
     auto mr3 = rapidsmpf::PinnedMemoryResource::make_if_available();
     EXPECT_NE(mr1, mr3);
+}
+
+TEST(PinnedResource, transient_mr) {
+    auto mr = rapidsmpf::PinnedMemoryResource::make_if_available();
+    if (mr == rapidsmpf::PinnedMemoryResource::Disabled) {
+        GTEST_SKIP() << "PinnedMemoryResource is not supported";
+    }
+    rmm::cuda_stream_view stream{};
+
+    auto source_data = random_vector<std::uint8_t>(0, 1024);
+
+    // create a pinned host buffer using mr
+    auto pinned_host_buffer = std::make_unique<rmm::device_buffer>(
+        source_data.data(), source_data.size(), stream, *mr
+    );
+
+    // now reset mr, but pinned_host_buffer should keep the shared mr alive
+    mr.reset();
+
+    auto buffer = rapidsmpf::HostBuffer::from_rmm_device_buffer(
+        std::move(pinned_host_buffer), stream
+    );
+
+    EXPECT_NO_THROW(test_buffer(std::move(buffer), source_data));
 }
 
 namespace {
