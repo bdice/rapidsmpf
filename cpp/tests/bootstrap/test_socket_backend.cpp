@@ -91,7 +91,7 @@ int connect_raw(SocketServer const& server) {
 // Send a line (appending '\n') to fd and return the first response line.
 std::string send_recv_line(int fd, std::string const& line) {
     std::string msg = line + "\n";
-    ::write(fd, msg.c_str(), msg.size());
+    EXPECT_EQ(::write(fd, msg.c_str(), msg.size()), static_cast<ssize_t>(msg.size()));
 
     std::string response;
     char ch;

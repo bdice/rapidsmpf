@@ -34,8 +34,6 @@ target_link_libraries(
   rrun
   PRIVATE Threads::Threads
           cuCascade::cucascade
-          $<$<TARGET_EXISTS:kvikio::kvikio>:kvikio::kvikio>
-          $<$<TARGET_EXISTS:nvcomp::nvcomp>:nvcomp::nvcomp>
           $<TARGET_NAME_IF_EXISTS:conda_env>
           maybe_asan
           $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
@@ -62,14 +60,8 @@ target_compile_options(
   topology_discovery PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${RAPIDSMPF_CXX_FLAGS}>"
 )
 target_link_libraries(
-  topology_discovery
-  PRIVATE cuCascade::cucascade
-          $<$<TARGET_EXISTS:kvikio::kvikio>:kvikio::kvikio>
-          $<$<TARGET_EXISTS:nvcomp::nvcomp>:nvcomp::nvcomp>
-          $<TARGET_NAME_IF_EXISTS:conda_env>
-          $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
-          maybe_asan
-          ${CMAKE_DL_LIBS}
+  topology_discovery PRIVATE cuCascade::cucascade $<TARGET_NAME_IF_EXISTS:conda_env>
+                             $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa> maybe_asan ${CMAKE_DL_LIBS}
 )
 install(
   TARGETS topology_discovery
@@ -97,14 +89,8 @@ target_compile_definitions(
   check_resource_binding PRIVATE $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:RAPIDSMPF_HAVE_NUMA>
 )
 target_link_libraries(
-  check_resource_binding
-  PRIVATE cuCascade::cucascade
-          $<$<TARGET_EXISTS:kvikio::kvikio>:kvikio::kvikio>
-          $<$<TARGET_EXISTS:nvcomp::nvcomp>:nvcomp::nvcomp>
-          $<TARGET_NAME_IF_EXISTS:conda_env>
-          maybe_asan
-          $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
-          ${CMAKE_DL_LIBS}
+  check_resource_binding PRIVATE cuCascade::cucascade $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan
+                                 $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa> ${CMAKE_DL_LIBS}
 )
 install(
   TARGETS check_resource_binding
