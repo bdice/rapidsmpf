@@ -18,7 +18,7 @@ rapids_cuda_init_architectures(librapidsmpf-python)
 project(
   librapidsmpf-python
   VERSION "${RAPIDS_VERSION}"
-  LANGUAGES CXX CUDA
+  LANGUAGES C CXX CUDA
 )
 
 # For now, disable CMake's automatic module scanning for C++ files. There is an sccache bug in the
