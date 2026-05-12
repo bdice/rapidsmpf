@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ComputeSanitizerOutput>
-  <record>
+  <!--<record>
     <kind>InitcheckApiError</kind>
     <level>Error</level>
     <what>
@@ -270,5 +270,5 @@
         <module>.*/librapidsmpf.so</module>
       </frame>
     </hostStack>
-  </record>
+  </record>-->
 </ComputeSanitizerOutput>
