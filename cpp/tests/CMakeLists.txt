@@ -268,7 +268,7 @@ target_compile_definitions(
 )
 target_link_libraries(
   bootstrap_tests PRIVATE GTest::gmock GTest::gtest $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan
-                          $<TARGET_NAME_IF_EXISTS:PMIx::PMIx> ${CMAKE_DL_LIBS}
+                          CUDA::toolkit $<TARGET_NAME_IF_EXISTS:PMIx::PMIx> ${CMAKE_DL_LIBS}
 )
 add_test(NAME bootstrap_tests COMMAND "gtests/bootstrap_tests")
 
