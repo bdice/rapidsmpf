@@ -99,8 +99,9 @@ std::string send_recv_line(int fd, std::string const& line) {
     while (bytes_left > 0) {
         auto written = ::write(fd, ptr, bytes_left);
         if (written < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
                 continue;
+            }
             throw std::runtime_error(
                 "write() failed: " + std::string{std::strerror(errno)}
             );
